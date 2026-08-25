@@ -1,0 +1,28 @@
+{
+  "zarr_format": 3,
+  "node_type": "group",
+  "attributes": {
+    "zarr_conventions": [
+      {
+        "uuid": "66da9667-d40f-46cb-93a5-7c915af5f7dc",
+        "schema_url": "https://raw.githubusercontent.com/developmentseed/icechest/refs/tags/v1/conventions/icechunk-iceberg/schema.json",
+        "name": "iceberg:"
+      },
+      {
+        "uuid": "2dc8d146-3932-4e08-8542-06aa0e826508",
+        "schema_url": "https://raw.githubusercontent.com/zarr-experimental/proj-prefix/refs/tags/v1/schema.json",
+        "name": "proj:"
+      }
+    ],
+    "iceberg:version": "1",
+    "iceberg:tables": {
+      "granules": {
+        "location": "s3://veda-odd/warehouse/granules"
+      },
+      "quality": {
+        "location": "s3://veda-odd/warehouse/quality"
+      }
+    },
+    "proj:code": "EPSG:4326"
+  }
+}

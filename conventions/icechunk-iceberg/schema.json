@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/developmentseed/icechest/refs/tags/v1/conventions/icechunk-iceberg/schema.json",
+  "title": "Icechunk-Iceberg Convention",
+  "description": "Binds a Zarr group to Apache Iceberg tables describing its arrays, with the current table version resolved from the Icechunk snapshot.",
+  "type": "object",
+  "properties": {
+    "attributes": {
+      "type": "object",
+      "properties": {
+        "iceberg:version": {
+          "type": "string",
+          "const": "1"
+        },
+        "iceberg:tables": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": { "$ref": "#/$defs/tableBinding" }
+        }
+      },
+      "required": ["iceberg:version", "iceberg:tables"]
+    }
+  },
+  "required": ["attributes"],
+  "$defs": {
+    "tableBinding": {
+      "type": "object",
+      "properties": {
+        "location": {
+          "type": "string",
+          "description": "Root URI of the Iceberg table's files."
+        }
+      },
+      "required": ["location"],
+      "additionalProperties": false
+    }
+  }
+}

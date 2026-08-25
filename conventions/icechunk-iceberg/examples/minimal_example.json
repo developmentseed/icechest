@@ -1,0 +1,21 @@
+{
+  "zarr_format": 3,
+  "node_type": "group",
+  "attributes": {
+    "zarr_conventions": [
+      {
+        "uuid": "66da9667-d40f-46cb-93a5-7c915af5f7dc",
+        "schema_url": "https://raw.githubusercontent.com/developmentseed/icechest/refs/tags/v1/conventions/icechunk-iceberg/schema.json",
+        "spec_url": "https://github.com/developmentseed/icechest/blob/v1/conventions/icechunk-iceberg/README.md",
+        "name": "iceberg:",
+        "description": "Binds a Zarr group to Apache Iceberg tables describing its arrays, with the current table version resolved from the Icechunk snapshot."
+      }
+    ],
+    "iceberg:version": "1",
+    "iceberg:tables": {
+      "granules": {
+        "location": "s3://veda-odd/warehouse/granules"
+      }
+    }
+  }
+}
