@@ -377,11 +377,14 @@ class HybridRepo:
             io_properties=io_properties,
         )
 
-    def _catalog_for(self, pointers: dict[str, str]) -> IcechunkCatalog:
+    def _catalog_for(
+        self, pointers: dict[str, str], *, read_only: bool = False
+    ) -> IcechunkCatalog:
         return IcechunkCatalog(
             warehouse=self.warehouse,
             pointers=pointers,
             properties=self.io_properties,
+            read_only=read_only,
         )
 
     def transaction(
@@ -452,5 +455,5 @@ class HybridSnapshot:
         location = resolve_metadata_location(
             name, self._repo.repo, self.snapshot_id
         )
-        catalog = self._repo._catalog_for({name: location})
+        catalog = self._repo._catalog_for({name: location}, read_only=True)
         return catalog.load_table(name)
