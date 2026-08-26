@@ -9,7 +9,9 @@ license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
     "icechunk>=2.1",
-    "pyiceberg>=0.11",
+    # Pinned below 0.12: validation.py depends on private helpers whose
+    # argument orientation contradicts their docstrings.
+    "pyiceberg>=0.11,<0.12",
     "pyarrow>=21",
     "zarr>=3",
     "numpy>=2",
