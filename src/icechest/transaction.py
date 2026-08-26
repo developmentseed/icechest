@@ -168,6 +168,9 @@ class HybridTransaction:
         #: Each table's Iceberg snapshot as of transaction start, captured the
         #: first time an operation needs a validation window.
         self._base_snapshots: dict[str, int | None] = {}
+        #: Table names staged on the catalog outside the intent API, captured
+        #: once before the retry loop starts. See ``_assert_staged_is_covered``.
+        self._unmanaged_staged: set[str] = set()
 
         self.session = repo.repo.writable_session(branch)
         self.catalog = repo._catalog_for(
@@ -251,14 +254,20 @@ class HybridTransaction:
         Retries on conflict by rebuilding the Iceberg metadata on the winning
         writer's version and rebasing the staged array chunks onto their
         snapshot.
+
+        If this is not used as a context manager, the caller owns the
+        session: on a raised error, nothing is published, but the session is
+        left live and must be discarded (or committed again) explicitly.
         """
+        self._unmanaged_staged = set(self.catalog.staged)
         for attempt in range(self._max_retries + 1):
             for intent in self._intents:
                 intent.apply(self.catalog)
 
             pointers = self.catalog.current_pointers()
             array_changes = self.session.has_uncommitted_changes
-            if not self.catalog.staged and not array_changes:
+            nothing_to_publish = not self.catalog.staged and not array_changes
+            if nothing_to_publish and attempt == 0:
                 raise ValueError(
                     f"Transaction {self._message!r} made no changes: no array "
                     "writes, and no table operation moved a pointer. A delete "
@@ -270,12 +279,20 @@ class HybridTransaction:
             # Keyed off staged pointers rather than the intent list, because an
             # intent can stage nothing and an append is not the only way to
             # move a pointer.
+            #
+            # A retry can also legitimately stage nothing: if the winning
+            # writer already made the same change (e.g. deleted the same
+            # rows), replaying our intent has nothing left to do. That is not
+            # the "made no changes" programming error above -- the check only
+            # applies to the first attempt -- so publish an empty Icechunk
+            # commit and let commit() still return a snapshot id.
             table_only = bool(self.catalog.staged) and not array_changes
+            allow_empty = table_only or nothing_to_publish
             try:
                 self.snapshot_id = self.session.commit(
                     self._message,
                     metadata=commit_metadata(pointers),
-                    allow_empty=table_only,
+                    allow_empty=allow_empty,
                 )
             except icechunk.ConflictError:
                 if attempt == self._max_retries:
@@ -294,16 +311,22 @@ class HybridTransaction:
     def _recover(self) -> None:
         """Adopt the winning writer's table version and rebase our array writes.
 
-        Order matters. Validation runs first, against the tip, so a refusal
-        aborts with nothing published. The pointer map is then adopted *before*
+        Order matters. ``_assert_staged_is_covered`` is a cheap, purely local
+        programming-error check -- it either indicates work bypassed the
+        intent API, in which case no amount of retrying will ever help, or it
+        passes. ``_validate_replayable`` is the expensive check (several
+        metadata reads and a manifest walk) and its refusal is the one a
+        caller can act on by re-planning. Running the cheap check first means
+        a caller who tripped both never gets told "re-plan and retry" for a
+        bug that retrying can't fix. The pointer map is then adopted *before*
         the rebase so the replayed Iceberg metadata descends from the version
         that actually won, and the rebase carries our staged chunks forward
         onto their snapshot, re-checking them for genuine array-level
         conflicts.
         """
         tip_pointers = read_pointers_at_branch(self._repo.repo, self._branch)
-        self._validate_replayable(tip_pointers)
         self._assert_staged_is_covered()
+        self._validate_replayable(tip_pointers)
         self.catalog.rebase_onto(tip_pointers)
         self.session.rebase(icechunk.BasicConflictSolver())
 
@@ -314,15 +337,23 @@ class HybridTransaction:
             intent.validate(tip_catalog, self._base_snapshots.get(intent.name))
 
     def _assert_staged_is_covered(self) -> None:
-        """Refuse to discard staged work that no intent can rebuild.
+        """Refuse to discard staged work that no intent can reproduce.
 
         ``rebase_onto`` abandons staged metadata because replaying the intents
-        recreates it on the winning writer's version. A table touched outside
-        the intent API breaks that assumption, and clearing it would drop the
-        work with no error.
+        rebuilds it on the winning writer's version. But an intent reproduces
+        only *its own* operation, not everything staged under its table's
+        name -- so checking table names alone would pass a direct catalog
+        mutation sitting alongside an unrelated intent on the same table, and
+        the rebase would then discard it with no error. ``_unmanaged_staged``
+        tracks what was staged outside the intent-apply path (captured once,
+        before the retry loop, since ``rebase_onto`` clears ``catalog.staged``
+        between attempts) so it is caught regardless of what else is staged
+        under the same name.
         """
         covered = {intent.name for intent in self._intents}
-        orphaned = sorted(set(self.catalog.staged) - covered)
+        orphaned = sorted(
+            self._unmanaged_staged | (set(self.catalog.staged) - covered)
+        )
         if orphaned:
             raise UnreplayableChangeError(orphaned)
 

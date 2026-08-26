@@ -81,7 +81,11 @@ included — so the caller can re-plan against what actually changed.
 
 The check is snapshot isolation, and it is conservative: candidate files are
 judged from column statistics, so a delete can be refused when a matching row
-merely might exist.
+merely might exist. But two concurrent deletes that touch the same data file
+can never both succeed regardless — the loser's copy-on-write rewrite would
+have to land on a file that genuinely still contains the other writer's
+target rows, which is the operationally significant case for a store
+expecting bulk retraction jobs.
 
 ## Garbage collection
 
@@ -107,8 +111,10 @@ them by listing the warehouse and subtracting what live refs reach.
 src/icechest/
   catalog.py       An Icechunk managed PyIceberg catalog with no catalog service
   convention.py    The Iceberg pointer Zarr convention usage
+  errors.py        Errors raised when table work cannot be replayed or published
   pointer.py       The table pointer in Icechunk commit metadata
   transaction.py   Iceberg commit management. Handles intents, atomic commit and conflict replay
+  validation.py    The snapshot-isolation conflict check for replayed deletes and overwrites
 conventions/icechunk-iceberg/
   README.md        The Iceberg pointer convention specification
   schema.json      JSON schema; examples/ validated against it in tests

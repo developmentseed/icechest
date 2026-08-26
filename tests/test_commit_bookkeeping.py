@@ -44,6 +44,33 @@ def test_zero_match_delete_commits_alongside_other_work(repo):
     assert snap.table("granules").scan().to_arrow().num_rows == 1
 
 
+def test_concurrent_identical_delete_replays_as_empty_commit(repo):
+    """Two writers delete the same rows; the loser's replay stages nothing.
+
+    Anna's intent is already satisfied on the branch once Ben's delete wins
+    the race, so replaying it legitimately stages nothing. That must not be
+    confused with "no changes were ever requested" -- the loser's commit()
+    should still succeed and return a snapshot id, with the rows gone
+    exactly once.
+    """
+    seed(repo, "g1", "g2")
+
+    anna = repo.transaction("main", "anna retracts g1")
+    ben = repo.transaction("main", "ben also retracts g1")
+
+    anna.delete("granules", "granule_id == 'g1'")
+    ben.delete("granules", "granule_id == 'g1'")
+
+    ben.commit()
+    snapshot_id = anna.commit()
+
+    assert snapshot_id is not None
+    snap = repo.read("main")
+    assert snap.snapshot_id == snapshot_id
+    rows = snap.table("granules").scan().to_arrow()
+    assert set(rows["granule_id"].to_pylist()) == {"g2"}
+
+
 def test_failed_commit_discards_the_session(repo):
     """A refused replay must not leave array writes live on the session."""
     seed(repo, "g1", "g2")

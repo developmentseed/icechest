@@ -105,6 +105,35 @@ def test_direct_catalog_mutation_is_refused(repo):
     assert set(rows["granule_id"].to_pylist()) == {"g1", "g2", "g9"}
 
 
+def test_direct_catalog_mutation_alongside_intent_on_same_table_is_refused(repo):
+    """A direct delete plus an intent on the *same* table evades a name-based guard.
+
+    ``test_direct_catalog_mutation_is_refused`` above happens to touch a table
+    that carries no intent at all, so a guard that merely checks "is this
+    table's name covered by some intent" catches it by luck. Here Anna also
+    appends to ``granules``, so the name *is* covered -- but the append
+    intent reproduces only the append, not the direct delete underneath it.
+    The guard has to track what was staged outside the intent API, not just
+    which table names appear in the intent list.
+    """
+    seed(repo, "g1", "g2")
+
+    anna = repo.transaction("main", "anna deletes behind the intent API and appends")
+    ben = repo.transaction("main", "ben ingests g9")
+
+    anna.catalog.load_table("granules").delete("granule_id == 'g1'")
+    anna.append("granules", granules("g7"))
+
+    ben.append("granules", granules("g9"))
+    ben.commit()
+
+    with pytest.raises(UnreplayableChangeError, match="granules"):
+        anna.commit()
+
+    rows = repo.read("main").table("granules").scan().to_arrow()
+    assert set(rows["granule_id"].to_pylist()) == {"g1", "g2", "g9"}
+
+
 def test_window_spans_every_intervening_commit(repo):
     """Two writers land before Anna retries; both are inside her window."""
     seed(repo, "g1", "g2")
