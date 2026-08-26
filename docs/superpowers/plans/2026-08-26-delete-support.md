@@ -125,7 +125,7 @@ from tests.helpers import GRANULE_SCHEMA, granules, seed
 - [ ] **Step 4: Verify the refactor changed no behaviour**
 
 Run: `uv run pytest -q`
-Expected: PASS, same 8 tests as before.
+Expected: PASS. `tests/test_hybrid.py` still contributes its 7 tests and the whole suite is green — this step is a pure move, so any change in the passing count means something was dropped.
 
 - [ ] **Step 5: Write the failing test**
 
@@ -929,7 +929,7 @@ from icechest import TableConflictError, UnreplayableChangeError
 - [ ] **Step 2: Run the test to verify it fails**
 
 Run: `uv run pytest tests/test_delete.py::test_direct_catalog_mutation_is_refused -q`
-Expected: FAIL — no exception is raised; the assertion on the final rows fails because `g1` is missing, or the commit succeeds silently.
+Expected: FAIL with `Failed: DID NOT RAISE <class 'icechest.errors.UnreplayableChangeError'>`. Anna's commit succeeds instead, and `g1` survives because the delete was discarded — the bug this task fixes.
 
 - [ ] **Step 3: Write the implementation**
 
