@@ -23,7 +23,7 @@ import zarr
 
 from icechest.catalog import IcechunkCatalog
 from icechest.convention import TableBinding, declare, read_bindings
-from icechest.errors import TableConflictError
+from icechest.errors import TableConflictError, UnreplayableChangeError
 from icechest.pointer import (
     commit_metadata,
     read_pointers,
@@ -295,6 +295,7 @@ class HybridTransaction:
         """
         tip_pointers = read_pointers_at_branch(self._repo.repo, self._branch)
         self._validate_replayable(tip_pointers)
+        self._assert_staged_is_covered()
         self.catalog.rebase_onto(tip_pointers)
         self.session.rebase(icechunk.BasicConflictSolver())
 
@@ -303,6 +304,19 @@ class HybridTransaction:
         tip_catalog = self._repo._catalog_for(tip_pointers)
         for intent in self._intents:
             intent.validate(tip_catalog, self._base_snapshots.get(intent.name))
+
+    def _assert_staged_is_covered(self) -> None:
+        """Refuse to discard staged work that no intent can rebuild.
+
+        ``rebase_onto`` abandons staged metadata because replaying the intents
+        recreates it on the winning writer's version. A table touched outside
+        the intent API breaks that assumption, and clearing it would drop the
+        work with no error.
+        """
+        covered = {intent.name for intent in self._intents}
+        orphaned = sorted(set(self.catalog.staged) - covered)
+        if orphaned:
+            raise UnreplayableChangeError(orphaned)
 
     # -- context manager ----------------------------------------------------
 

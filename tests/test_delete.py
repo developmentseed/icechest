@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from icechest import TableConflictError
+from icechest import TableConflictError, UnreplayableChangeError
 from tests.helpers import granules, seed
 
 
@@ -83,3 +83,23 @@ def test_overwrite_reingest_replays_over_disjoint_append(repo):
         )
     )
     assert corrected["g1"].date().isoformat() == "2026-02-02"
+
+
+def test_direct_catalog_mutation_is_refused(repo):
+    """The escape hatch that used to lose deletes silently now raises."""
+    seed(repo, "g1", "g2")
+
+    anna = repo.transaction("main", "anna deletes behind the intent API")
+    ben = repo.transaction("main", "ben ingests g9")
+
+    anna.group["data"][50:60] = np.full(10, 2.0, "f4")
+    anna.catalog.load_table("granules").delete("granule_id == 'g1'")
+
+    ben.append("granules", granules("g9"))
+    ben.commit()
+
+    with pytest.raises(UnreplayableChangeError, match="granules"):
+        anna.commit()
+
+    rows = repo.read("main").table("granules").scan().to_arrow()
+    assert set(rows["granule_id"].to_pylist()) == {"g1", "g2", "g9"}
