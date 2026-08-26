@@ -85,6 +85,58 @@ def test_identical_endpoints_are_never_a_conflict(two_snapshots):
     assert ids == []
 
 
+def test_unknown_base_snapshot_is_treated_as_a_conflict(two_snapshots):
+    """Refuse to prove safety when only one end of the window is present.
+
+    If the table's metadata doesn't contain the base snapshot at all -- the
+    histories have nothing in common that we can see -- nothing can be proven
+    about what happened in between. Refusing the replay is the safe
+    direction to err, the same way a conservative file-statistics match is.
+    """
+    table, _, tip_id = two_snapshots
+    unknown_base_id = 999999999
+    assert table.metadata.snapshot_by_id(unknown_base_id) is None
+
+    ids = conflicting_adds(
+        table,
+        base_snapshot_id=unknown_base_id,
+        tip_snapshot_id=tip_id,
+        predicate="granule_id == 'g4'",
+    )
+
+    assert ids == [tip_id]
+
+
+def test_unwalkable_history_is_treated_as_a_conflict(two_snapshots, monkeypatch):
+    """Pin our contract for when the underlying walk cannot complete.
+
+    This deliberately patches ``_added_data_files`` rather than constructing
+    a real divergent history: the point isn't to reproduce the conditions
+    that make PyIceberg raise ``ValidationException`` (that's PyIceberg's
+    concern), but to pin what *we* do when that call cannot complete --
+    including a message unrelated to the ones we've seen in practice, since
+    the guard has to hold for any ``ValidationException`` PyIceberg raises
+    here, not just the one we've reproduced.
+    """
+    table, base_id, tip_id = two_snapshots
+
+    def raise_validation_exception(**kwargs):
+        raise ValidationException("No summary found for snapshot")
+
+    monkeypatch.setattr(
+        "icechest.validation._added_data_files", raise_validation_exception
+    )
+
+    ids = conflicting_adds(
+        table,
+        base_snapshot_id=base_id,
+        tip_snapshot_id=tip_id,
+        predicate="granule_id == 'g4'",
+    )
+
+    assert ids == [tip_id]
+
+
 def test_upstream_argument_orientation_is_inverted(two_snapshots):
     """Pin the trap our wrapper exists to hide.
 
