@@ -112,13 +112,13 @@ def test_window_spans_every_intervening_commit(repo):
     anna = repo.transaction("main", "anna retracts g1")
     anna.delete("granules", "granule_id == 'g1'")
 
-    with repo.transaction("main", "ben ingests g8") as ben:
-        ben.append("granules", granules("g8"))
     with repo.transaction("main", "carol re-ingests g1") as carol:
         carol.append("granules", granules("g1"))
+    with repo.transaction("main", "ben ingests g8") as ben:
+        ben.append("granules", granules("g8"))
 
-    # Carol's add is two commits back from the tip: a window anchored on the
-    # most recent commit alone would miss it.
+    # Carol's matching add is not the tip -- Ben's disjoint commit is. A window
+    # covering only the tip's own commit would see nothing to conflict with.
     with pytest.raises(TableConflictError):
         anna.commit()
 
