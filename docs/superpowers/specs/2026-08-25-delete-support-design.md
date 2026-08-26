@@ -180,6 +180,14 @@ only puts them in an exception message. This inversion gets a dedicated test so
 that a 0.12 upgrade correcting the names fails loudly instead of quietly
 validating an empty range.
 
+The wrapper drops the base snapshot's own id from the result. `ancestors_between`
+is inclusive of both ends, so the base snapshot's added files come back as
+conflicts — and the base is usually the snapshot that added the very rows the
+delete targets, which would make every delete conflict with itself. The window
+we want is `(base, tip]`, not `[base, tip]`. Verified against 0.11.1: a delete of
+`granule_id == 'g1'` reports the base snapshot as conflicting until it is
+filtered out.
+
 Validation is conservative. `_added_data_files` filters candidate files with
 `_InclusiveMetricsEvaluator`, which judges from column statistics, so a file
 whose stats range covers the predicate but which contains no matching rows
@@ -198,18 +206,24 @@ Each table's window has a fixed left edge and a moving right edge.
   map.
 - **Right edge** — the tip's current snapshot at each recovery attempt.
 
-The left edge stays fixed across retries while the right edge advances. In a
-three-writer pile-up, re-anchoring the left edge to the most recent winner would
-skip the middle writer's commits entirely.
+The left edge stays fixed across retries while the right edge advances, so every
+attempt validates the whole range back to where the operation was planned.
+Re-anchoring the left edge to each winner in turn would also be correct — the
+retries validate each interval exactly once, and the union is the same range —
+but a fixed edge is what the natural implementation gives, since the id is
+captured once at record time, and it stays correct even if a future code path
+recovers without validating. The cost is re-scanning intervals already cleared.
 
-Two edge cases:
+Two edge cases, both handled by treating a missing base snapshot id as
+unprovable:
 
-- **No base pointer and no tip pointer** — the table is created in this
-  transaction. Nothing can have been added to it, so validation passes.
-- **No base pointer but a tip pointer exists** — another writer created a table
-  with the same name concurrently. `CreateTable.apply` returns early when the
-  table exists, so replaying would apply our delete to *their* table. This is a
-  conflict and raises.
+- **No base snapshot and no tip snapshot** — the table was created in this
+  transaction, or holds no rows anywhere. Nothing can have been added to it, so
+  validation passes.
+- **No base snapshot but the tip has one** — another writer created or first
+  populated this table concurrently. `CreateTable.apply` returns early when the
+  table exists, so replaying would apply our delete to *their* table with no
+  window to validate against. This raises.
 
 ### Why added-files is the only check needed
 
