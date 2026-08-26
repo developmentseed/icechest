@@ -2,46 +2,12 @@
 
 from __future__ import annotations
 
-import icechunk
 import numpy as np
 import pyarrow as pa
 import pytest
 
-from icechest import HybridRepo, read_pointers_at_tag
-
-GRANULE_SCHEMA = pa.schema(
-    [
-        pa.field("granule_id", pa.string(), nullable=False),
-        pa.field("datetime", pa.timestamp("ms"), nullable=False),
-        pa.field("array_path", pa.string(), nullable=False),
-    ]
-)
-
-
-def granules(*ids: str) -> pa.Table:
-    return pa.table(
-        {
-            "granule_id": list(ids),
-            "datetime": pa.array(
-                [np.datetime64("2026-01-01", "ms")] * len(ids), pa.timestamp("ms")
-            ),
-            "array_path": [f"/data/{g}" for g in ids],
-        },
-        schema=GRANULE_SCHEMA,
-    )
-
-
-@pytest.fixture
-def repo(tmp_path):
-    store = icechunk.local_filesystem_storage(str(tmp_path / "icechunk"))
-    return HybridRepo.create(store, warehouse=str(tmp_path / "warehouse"))
-
-
-def seed(repo) -> str:
-    with repo.transaction("main", "seed") as tx:
-        tx.group.create_array("data", shape=(100,), dtype="f4", chunks=(10,))
-        tx.create_table("granules", GRANULE_SCHEMA)
-    return tx.snapshot_id
+from icechest import read_pointers_at_tag
+from tests.helpers import GRANULE_SCHEMA, granules, seed
 
 
 def test_arrays_and_table_land_in_one_commit(repo):
