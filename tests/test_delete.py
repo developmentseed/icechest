@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
+from icechest import TableConflictError
 from tests.helpers import granules, seed
 
 
@@ -28,3 +30,28 @@ def test_delete_replays_over_disjoint_append(repo):
     assert set(rows["granule_id"].to_pylist()) == {"g2", "g3", "g4"}
     assert snap.group["data"][0] == 1.0
     assert snap.group["data"][50] == 2.0
+
+
+def test_delete_fails_when_winner_adds_matching_row(repo):
+    """Ben re-ingests the granule Anna is retracting: she must re-plan."""
+    seed(repo, "g1", "g2")
+
+    anna = repo.transaction("main", "anna retracts g1")
+    ben = repo.transaction("main", "ben re-ingests g1")
+
+    anna.group["data"][50:60] = np.full(10, 2.0, "f4")
+    anna.delete("granules", "granule_id == 'g1'")
+
+    ben.append("granules", granules("g1"))
+    ben_snapshot = ben.commit()
+
+    with pytest.raises(TableConflictError) as excinfo:
+        anna.commit()
+
+    assert excinfo.value.table == "granules"
+    assert excinfo.value.snapshot_ids
+
+    tip = repo.read("main")
+    assert tip.snapshot_id == ben_snapshot  # Anna published nothing
+    assert tip.group["data"][50] == 0.0  # her array write died with the delete
+    assert tip.table("granules").scan().to_arrow().num_rows == 3

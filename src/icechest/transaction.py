@@ -23,15 +23,18 @@ import zarr
 
 from icechest.catalog import IcechunkCatalog
 from icechest.convention import TableBinding, declare, read_bindings
+from icechest.errors import TableConflictError
 from icechest.pointer import (
     commit_metadata,
     read_pointers,
     read_pointers_at_branch,
     resolve_metadata_location,
 )
+from icechest.validation import conflicting_adds
 
 if TYPE_CHECKING:
     import pyarrow as pa
+    from pyiceberg.expressions import BooleanExpression
     from pyiceberg.schema import Schema
 
 logger = logging.getLogger(__name__)
@@ -42,8 +45,18 @@ DEFAULT_MAX_RETRIES = 10
 class TableIntent:
     """A table operation to (re)apply against whatever the current parent is."""
 
+    name: str
+
     def apply(self, catalog: IcechunkCatalog) -> None:
         raise NotImplementedError
+
+    def validate(self, catalog: IcechunkCatalog, base_snapshot_id: int | None) -> None:
+        """Check that replaying onto ``catalog``'s version is safe.
+
+        Adding rows commutes with adding other rows, so the default is a no-op.
+        Operations that remove rows depend on what the other writer did and
+        override this.
+        """
 
 
 @dataclass
@@ -73,6 +86,54 @@ class AppendRows(TableIntent):
         catalog.load_table(self.name).append(self.data)
 
 
+def _validate_removal(
+    catalog: IcechunkCatalog,
+    name: str,
+    predicate: str | BooleanExpression,
+    base_snapshot_id: int | None,
+) -> None:
+    """Refuse to replay a row-removing operation onto an incompatible version.
+
+    ``catalog`` is loaded at the winning writer's pointers. Shared by delete and
+    overwrite: PyIceberg's overwrite is a delete followed by an append, and the
+    append half commutes, so the delete half carries the whole hazard.
+    """
+    if not catalog.table_exists(name):
+        return  # our own CreateTable intent will make it
+
+    table = catalog.load_table(name)
+    tip_snapshot_id = table.metadata.current_snapshot_id
+    if tip_snapshot_id is None:
+        return  # the winner's table holds no rows at all
+
+    if base_snapshot_id is None:
+        # No version to anchor a window on: either the table did not exist when
+        # we started, or it held no rows, and the winner's does. Nothing can be
+        # proven, so refuse rather than delete rows we never saw.
+        raise TableConflictError(name, predicate, [tip_snapshot_id])
+
+    ids = conflicting_adds(
+        table,
+        base_snapshot_id=base_snapshot_id,
+        tip_snapshot_id=tip_snapshot_id,
+        predicate=predicate,
+    )
+    if ids:
+        raise TableConflictError(name, predicate, ids)
+
+
+@dataclass
+class DeleteRows(TableIntent):
+    name: str
+    predicate: str | BooleanExpression
+
+    def apply(self, catalog: IcechunkCatalog) -> None:
+        catalog.load_table(self.name).delete(self.predicate)
+
+    def validate(self, catalog: IcechunkCatalog, base_snapshot_id: int | None) -> None:
+        _validate_removal(catalog, self.name, self.predicate, base_snapshot_id)
+
+
 class HybridTransaction:
     """Stage array writes and table operations, then publish them as one commit."""
 
@@ -89,6 +150,9 @@ class HybridTransaction:
         self._message = message
         self._max_retries = max_retries
         self._intents: list[TableIntent] = []
+        #: Each table's Iceberg snapshot as of transaction start, captured the
+        #: first time an operation needs a validation window.
+        self._base_snapshots: dict[str, int | None] = {}
 
         self.session = repo.repo.writable_session(branch)
         self.catalog = repo._catalog_for(
@@ -126,6 +190,31 @@ class HybridTransaction:
     def append(self, name: str, data: pa.Table) -> None:
         """Append rows to a table. Appends are what the retry loop can replay."""
         self._intents.append(AppendRows(name, data))
+
+    def delete(self, name: str, predicate: str | BooleanExpression) -> None:
+        """Delete rows matching ``predicate``.
+
+        Replayable only when another writer's commits provably did not touch
+        the rows in question; see :func:`_validate_removal`.
+        """
+        self._capture_base_snapshot(name)
+        self._intents.append(DeleteRows(name, predicate))
+
+    def _capture_base_snapshot(self, name: str) -> None:
+        """Pin the left edge of this table's validation window.
+
+        Captured lazily, because only row-removing operations need it and it
+        costs a metadata read. Captured once, so retries validate the whole
+        range back to where the operation was planned rather than re-anchoring
+        on each new winner.
+        """
+        if name in self._base_snapshots:
+            return
+        if name not in self.catalog.pointers:
+            self._base_snapshots[name] = None  # created in this transaction
+            return
+        metadata = self.catalog.load_table(name).metadata
+        self._base_snapshots[name] = metadata.current_snapshot_id
 
     # -- commit -------------------------------------------------------------
 
@@ -170,14 +259,23 @@ class HybridTransaction:
     def _recover(self) -> None:
         """Adopt the winning writer's table version and rebase our array writes.
 
-        Order matters. The pointer map is re-read *before* the rebase so that
-        the replayed Iceberg metadata descends from the version that actually
-        won, and the rebase then carries our staged chunks forward onto their
-        snapshot, re-checking them for genuine array-level conflicts.
+        Order matters. Validation runs first, against the tip, so a refusal
+        aborts with nothing published. The pointer map is then adopted *before*
+        the rebase so the replayed Iceberg metadata descends from the version
+        that actually won, and the rebase carries our staged chunks forward
+        onto their snapshot, re-checking them for genuine array-level
+        conflicts.
         """
         tip_pointers = read_pointers_at_branch(self._repo.repo, self._branch)
+        self._validate_replayable(tip_pointers)
         self.catalog.rebase_onto(tip_pointers)
         self.session.rebase(icechunk.BasicConflictSolver())
+
+    def _validate_replayable(self, tip_pointers: dict[str, str]) -> None:
+        """Ask each intent whether it can be rebuilt on the winner's version."""
+        tip_catalog = self._repo._catalog_for(tip_pointers)
+        for intent in self._intents:
+            intent.validate(tip_catalog, self._base_snapshots.get(intent.name))
 
     # -- context manager ----------------------------------------------------
 
