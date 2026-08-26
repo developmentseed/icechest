@@ -71,6 +71,11 @@ concurrent commit would fail nearly every delete.
   warns and falls back to copy-on-write.
 - Serializable isolation as a selectable mode.
 - Optimizing the validation scan with partition or column statistics.
+- Recording abandoned file locations for the garbage collector. Nothing points
+  at the files a failed attempt orphans, so a sweeper must find them by listing
+  the warehouse and subtracting the reachable set. Writing that record is
+  cheap — `catalog.staged` holds the locations at the moment `rebase_onto`
+  discards them — but it belongs with the garbage-collection work, not here.
 
 ## Background: what upstream provides
 
