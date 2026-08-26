@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from icechest import TableConflictError, UnreplayableChangeError
-from tests.helpers import granules, seed
+from tests.helpers import GRANULE_SCHEMA, granules, seed
 
 
 def test_delete_replays_over_disjoint_append(repo):
@@ -103,3 +103,79 @@ def test_direct_catalog_mutation_is_refused(repo):
 
     rows = repo.read("main").table("granules").scan().to_arrow()
     assert set(rows["granule_id"].to_pylist()) == {"g1", "g2", "g9"}
+
+
+def test_window_spans_every_intervening_commit(repo):
+    """Two writers land before Anna retries; both are inside her window."""
+    seed(repo, "g1", "g2")
+
+    anna = repo.transaction("main", "anna retracts g1")
+    anna.delete("granules", "granule_id == 'g1'")
+
+    with repo.transaction("main", "ben ingests g8") as ben:
+        ben.append("granules", granules("g8"))
+    with repo.transaction("main", "carol re-ingests g1") as carol:
+        carol.append("granules", granules("g1"))
+
+    # Carol's add is two commits back from the tip: a window anchored on the
+    # most recent commit alone would miss it.
+    with pytest.raises(TableConflictError):
+        anna.commit()
+
+
+def test_disjoint_pile_up_still_replays(repo):
+    seed(repo, "g1", "g2")
+
+    anna = repo.transaction("main", "anna retracts g1")
+    anna.delete("granules", "granule_id == 'g1'")
+
+    with repo.transaction("main", "ben ingests g8") as ben:
+        ben.append("granules", granules("g8"))
+    with repo.transaction("main", "carol ingests g9") as carol:
+        carol.append("granules", granules("g9"))
+
+    anna.commit()
+
+    rows = repo.read("main").table("granules").scan().to_arrow()
+    assert set(rows["granule_id"].to_pylist()) == {"g2", "g8", "g9"}
+
+
+def test_row_and_array_region_are_atomic(repo):
+    """The causally-linked case: the row and the region it describes."""
+    seed(repo, "g1", "g2")
+    with repo.transaction("main", "fill g1's region") as tx:
+        tx.group["data"][0:10] = np.ones(10, "f4")
+
+    anna = repo.transaction("main", "anna retracts g1 and zeroes its region")
+    anna.delete("granules", "granule_id == 'g1'")
+    anna.group["data"][0:10] = np.zeros(10, "f4")
+
+    with repo.transaction("main", "ben re-ingests g1") as ben:
+        ben.append("granules", granules("g1"))
+
+    with pytest.raises(TableConflictError):
+        anna.commit()
+
+    snap = repo.read("main")
+    assert snap.group["data"][0] == 1.0  # the region was not zeroed
+    assert snap.table("granules").scan().to_arrow().num_rows == 3
+
+
+def test_delete_against_concurrently_created_table_is_refused(repo):
+    """Two writers create the same table; ours must not delete from theirs."""
+    with repo.transaction("main", "seed arrays") as tx:
+        tx.group.create_array("data", shape=(100,), dtype="f4", chunks=(10,))
+
+    anna = repo.transaction("main", "anna creates and prunes")
+    anna.create_table("granules", GRANULE_SCHEMA)
+    anna.delete("granules", "granule_id == 'g1'")
+
+    with repo.transaction("main", "ben creates and fills") as ben:
+        ben.create_table("granules", GRANULE_SCHEMA)
+        ben.append("granules", granules("g1"))
+
+    with pytest.raises(TableConflictError):
+        anna.commit()
+
+    rows = repo.read("main").table("granules").scan().to_arrow()
+    assert set(rows["granule_id"].to_pylist()) == {"g1"}
