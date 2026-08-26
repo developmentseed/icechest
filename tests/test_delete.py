@@ -55,3 +55,31 @@ def test_delete_fails_when_winner_adds_matching_row(repo):
     assert tip.snapshot_id == ben_snapshot  # Anna published nothing
     assert tip.group["data"][50] == 0.0  # her array write died with the delete
     assert tip.table("granules").scan().to_arrow().num_rows == 3
+
+
+def test_overwrite_reingest_replays_over_disjoint_append(repo):
+    """Anna corrects g1's row while Ben ingests g9."""
+    seed(repo, "g1", "g2")
+
+    anna = repo.transaction("main", "anna re-ingests g1")
+    ben = repo.transaction("main", "ben ingests g9")
+
+    anna.overwrite(
+        "granules", granules("g1", day="2026-02-02"), "granule_id == 'g1'"
+    )
+    anna.group["data"][50:60] = np.full(10, 2.0, "f4")
+
+    ben.append("granules", granules("g9"))
+    ben.commit()
+    anna.commit()
+
+    rows = repo.read("main").table("granules").scan().to_arrow()
+    assert sorted(rows["granule_id"].to_pylist()) == ["g1", "g2", "g9"]
+    corrected = dict(
+        zip(
+            rows["granule_id"].to_pylist(),
+            rows["datetime"].to_pylist(),
+            strict=True,
+        )
+    )
+    assert corrected["g1"].date().isoformat() == "2026-02-02"

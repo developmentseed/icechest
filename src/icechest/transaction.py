@@ -134,6 +134,21 @@ class DeleteRows(TableIntent):
         _validate_removal(catalog, self.name, self.predicate, base_snapshot_id)
 
 
+@dataclass
+class OverwriteRows(TableIntent):
+    name: str
+    data: pa.Table
+    predicate: str | BooleanExpression
+
+    def apply(self, catalog: IcechunkCatalog) -> None:
+        catalog.load_table(self.name).overwrite(
+            self.data, overwrite_filter=self.predicate
+        )
+
+    def validate(self, catalog: IcechunkCatalog, base_snapshot_id: int | None) -> None:
+        _validate_removal(catalog, self.name, self.predicate, base_snapshot_id)
+
+
 class HybridTransaction:
     """Stage array writes and table operations, then publish them as one commit."""
 
@@ -199,6 +214,18 @@ class HybridTransaction:
         """
         self._capture_base_snapshot(name)
         self._intents.append(DeleteRows(name, predicate))
+
+    def overwrite(
+        self, name: str, data: pa.Table, predicate: str | BooleanExpression
+    ) -> None:
+        """Replace the rows matching ``predicate`` with ``data``.
+
+        PyIceberg applies this as a delete followed by an append, which can
+        produce two Iceberg snapshots. Readers never see the state between
+        them: only the final ``metadata.json`` reaches commit metadata.
+        """
+        self._capture_base_snapshot(name)
+        self._intents.append(OverwriteRows(name, data, predicate))
 
     def _capture_base_snapshot(self, name: str) -> None:
         """Pin the left edge of this table's validation window.
