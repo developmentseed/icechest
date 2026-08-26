@@ -257,12 +257,20 @@ class HybridTransaction:
                 intent.apply(self.catalog)
 
             pointers = self.catalog.current_pointers()
+            array_changes = self.session.has_uncommitted_changes
+            if not self.catalog.staged and not array_changes:
+                raise ValueError(
+                    f"Transaction {self._message!r} made no changes: no array "
+                    "writes, and no table operation moved a pointer. A delete "
+                    "matching no rows stages nothing."
+                )
             # A table-only transaction changes no Zarr nodes, so Icechunk sees
             # an empty commit -- but the pointer in the commit metadata *did*
             # move, which is a real change in this design. Allow it explicitly.
-            table_only = (
-                bool(self._intents) and not self.session.has_uncommitted_changes
-            )
+            # Keyed off staged pointers rather than the intent list, because an
+            # intent can stage nothing and an append is not the only way to
+            # move a pointer.
+            table_only = bool(self.catalog.staged) and not array_changes
             try:
                 self.snapshot_id = self.session.commit(
                     self._message,
@@ -332,7 +340,13 @@ class HybridTransaction:
         if exc_type is not None:
             self.session.discard_changes()
             return
-        self.commit()
+        try:
+            self.commit()
+        except BaseException:
+            # A refused replay publishes nothing, so the staged array writes
+            # must not outlive it either.
+            self.session.discard_changes()
+            raise
 
 
 class HybridRepo:
