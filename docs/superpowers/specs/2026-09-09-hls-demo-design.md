@@ -238,7 +238,10 @@ contradicts its data is exactly what should not be published.
 `ingest_batch` opens one transaction, writes each granule's virtual references
 into that transaction's session, appends the successful rows once, and commits
 once. Virtual writes go to `tx.session.store`, so they are staged in the same
-session as the table pointer and published by the same commit.
+session as the table pointer and published by the same commit —
+`ds.vz.to_icechunk` stages into the session without committing it, which is what
+makes a single commit per batch possible. The batch test asserts this directly
+by counting snapshots.
 
 A granule that fails — missing asset, unparseable header, shape mismatch —
 contributes neither arrays nor a row, and is recorded in
@@ -298,13 +301,6 @@ The notebook is a deliverable, not a test target.
   `virtual-tiff>=0.5`, and `obstore>=0.11`.
 
 ## Risks
-
-**`to_icechunk` must not commit.** The atomicity claim depends on
-`ds.vz.to_icechunk(store=tx.session.store, group=...)` staging into the session
-without committing it. The zarr-datafusion notebook commits separately
-afterwards, which implies it does not — but if it commits internally, each
-granule's arrays land in their own snapshot and the single-commit design
-collapses. **This must be verified before anything is built on it.**
 
 **Runtime.** About 1,100 asset header reads per 75-granule batch. If that proves
 too slow to be a usable demo, the mitigation is a smaller default `limit`, not a
