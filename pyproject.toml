@@ -17,6 +17,14 @@ dependencies = [
     "numpy>=2",
 ]
 
+[project.optional-dependencies]
+demo = [
+    "virtualizarr>=2.7",
+    "virtual-tiff>=0.5",
+    "obstore>=0.11",
+    "obspec-utils>=0.9",
+]
+
 [dependency-groups]
 dev = [
     "jsonschema>=4.26.0",
@@ -45,3 +53,7 @@ indent-style = "space"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "network: hits live services (MAAP archive, Earthdata, LP DAAC); deselected by default",
+]
+addopts = "-m 'not network'"
