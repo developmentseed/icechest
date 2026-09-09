@@ -25,6 +25,14 @@ def test_unexpected_host_is_refused():
         to_s3_url("https://example.com/some/other.tif")
 
 
+def test_href_outside_the_protected_bucket_is_refused():
+    """Only lp-prod-protected has a virtual chunk container declared, so a URL
+    anywhere else would be recorded as an unresolvable reference."""
+    other = "https://data.lpdaac.earthdatacloud.nasa.gov/lp-prod-public/thing.tif"
+    with pytest.raises(ValueError, match="lp-prod-protected"):
+        to_s3_url(other)
+
+
 def test_asset_urls_maps_requested_bands():
     row = {"assets": {"B04": {"href": HREF}, "B03": {"href": HREF}}}
     assert asset_urls(row, bands=("B04",)) == {"B04": S3}

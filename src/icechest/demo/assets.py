@@ -24,10 +24,21 @@ DEFAULT_BANDS: tuple[str, ...] = (
 
 
 def to_s3_url(href: str) -> str:
-    """Rewrite an LP DAAC distribution href to its S3 equivalent."""
+    """Rewrite an LP DAAC distribution href to the S3 URL we will record.
+
+    The result must fall under ``LPDAAC_S3_PREFIX``: that is the prefix the
+    Icechunk virtual chunk container is declared against, so a URL outside it
+    would be written as a reference nothing can resolve.
+    """
     if not href.startswith(LPDAAC_HTTPS_PREFIX):
         raise ValueError(f"not an LP DAAC distribution href: {href!r}")
-    return "s3://" + href[len(LPDAAC_HTTPS_PREFIX) :]
+    url = "s3://" + href[len(LPDAAC_HTTPS_PREFIX) :]
+    if not url.startswith(LPDAAC_S3_PREFIX):
+        raise ValueError(
+            f"{href!r} is not in the {LPDAAC_S3_PREFIX} bucket, which is the only "
+            "prefix this store declares a virtual chunk container for"
+        )
+    return url
 
 
 def asset_urls(
