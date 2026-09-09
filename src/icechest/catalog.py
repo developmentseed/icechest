@@ -57,6 +57,9 @@ class IcechunkCatalog(Catalog):
         snapshot. Read-only; staged changes go to :attr:`staged`.
     properties:
         FileIO properties (e.g. S3 credentials).
+    read_only:
+        Refuse operations that would write a new ``metadata.json``. Set for
+        catalogs built from a snapshot, whose writes no commit would publish.
     """
 
     def __init__(
@@ -66,6 +69,7 @@ class IcechunkCatalog(Catalog):
         warehouse: str,
         pointers: dict[str, str] | None = None,
         properties: Properties | None = None,
+        read_only: bool = False,
     ) -> None:
         super().__init__(name, **(properties or {}))
         self.warehouse = warehouse.rstrip("/")
@@ -73,6 +77,7 @@ class IcechunkCatalog(Catalog):
         #: Pointer updates produced this session, not yet published by Icechunk.
         self.staged: dict[str, str] = {}
         self._io: FileIO = load_file_io(properties=dict(self.properties))
+        self.read_only = read_only
 
     # -- pointer plumbing ---------------------------------------------------
 
@@ -106,6 +111,15 @@ class IcechunkCatalog(Catalog):
 
     # -- Catalog interface --------------------------------------------------
 
+    def _assert_writable(self) -> None:
+        if self.read_only:
+            raise NotImplementedError(
+                "This catalog was opened from a snapshot and is read-only. "
+                "Table writes must go through repo.transaction(...), so the "
+                "new metadata.json is published by an Icechunk commit instead "
+                "of being orphaned in the warehouse."
+            )
+
     def create_table(
         self,
         identifier: str | Identifier,
@@ -115,6 +129,7 @@ class IcechunkCatalog(Catalog):
         sort_order: SortOrder = UNSORTED_SORT_ORDER,
         properties: Properties = {},  # noqa: B006 - matches PyIceberg's signature
     ) -> Table:
+        self._assert_writable()
         name = self.table_name_from(identifier)
         if name in self.current_pointers():
             raise TableAlreadyExistsError(f"Table already exists: {name}")
@@ -165,6 +180,7 @@ class IcechunkCatalog(Catalog):
         atomicity check happens later, when Icechunk commits the staged pointer
         and detects that another writer moved the branch tip.
         """
+        self._assert_writable()
         name = self.table_name_from(table.name())
         base_location = self.current_pointers().get(name)
         base_metadata = (

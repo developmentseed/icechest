@@ -71,10 +71,21 @@ parent and nothing needs unwinding because nothing was ever published. The
 abandoned metadata files become dereferenced garbage that can be collected and
 compacted later.
 
-This automatic recovery is for **appends**. An operation that depends on what the
-other writer changed (deleting rows for array data they rewrote)
-must fail and re-plan.  I'll be working on supporting this in more automatic way
-with subsequent PRs.
+Appends replay unconditionally: adding rows commutes with adding other rows.
+Deletes and overwrites cannot, so they are replayed only when it is provably
+safe. Before adopting the winner's version, the delete's predicate is checked
+against every commit that landed since the operation was planned. If nobody
+added rows matching it, the operation is rebuilt on their version; if somebody
+did, the transaction raises `TableConflictError` and publishes nothing — arrays
+included — so the caller can re-plan against what actually changed.
+
+The check is snapshot isolation, and it is conservative: candidate files are
+judged from column statistics, so a delete can be refused when a matching row
+merely might exist. But two concurrent deletes that touch the same data file
+can never both succeed regardless — the loser's copy-on-write rewrite would
+have to land on a file that genuinely still contains the other writer's
+target rows, which is the operationally significant case for a store
+expecting bulk retraction jobs.
 
 ## Garbage collection
 
@@ -89,14 +100,21 @@ also deny delete permissions on the warehouse prefix at the storage layer.
 Reclaiming space needs a sweeper that treats Icechunk refs as the source of
 truth.
 
+Deletes enlarge the problem. They are copy-on-write, so a delete that loses a
+race leaves behind the data files it rewrote as well as its abandoned
+`metadata.json` and manifests. Nothing points at those files — a sweeper finds
+them by listing the warehouse and subtracting what live refs reach.
+
 ## Layout
 
 ```
 src/icechest/
   catalog.py       An Icechunk managed PyIceberg catalog with no catalog service
   convention.py    The Iceberg pointer Zarr convention usage
+  errors.py        Errors raised when table work cannot be replayed or published
   pointer.py       The table pointer in Icechunk commit metadata
   transaction.py   Iceberg commit management. Handles intents, atomic commit and conflict replay
+  validation.py    The snapshot-isolation conflict check for replayed deletes and overwrites
 conventions/icechunk-iceberg/
   README.md        The Iceberg pointer convention specification
   schema.json      JSON schema; examples/ validated against it in tests
@@ -117,5 +135,6 @@ Todo:
 - **Garbage collection.** The garbage-collection story is currently "disable Iceberg's
   cleanup"; the Icechunk-ref-aware collector that makes space reclaimable is
   unimplemented.
-- **Non-append conflict re-planning.** Appends recover automatically. Deletes and
-  overwrites currently just fail.
+- **Upsert and merge-on-read deletes.** Deletes and overwrites replay under
+  snapshot isolation; `upsert` is not exposed, and deletes are copy-on-write
+  because PyIceberg does not write delete files.

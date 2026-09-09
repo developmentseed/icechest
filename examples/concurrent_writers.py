@@ -82,7 +82,17 @@ def main() -> None:
     )
     print(f"   pointer:     {Path(tip.pointers['granules']).name}\n")
 
-    print("6. A tag pins arrays and table version together.")
+    print("6. A delete replays too, when nobody touched the rows it targets.")
+    retract = repo.transaction("main", "retract G-100")
+    retract.delete("granules", "granule_id == 'G-100'")
+    with repo.transaction("main", "concurrent unrelated ingest") as other:
+        other.group["reflectance"][100:110] = np.full(10, 5.0, "f4")
+        other.append("granules", row("G-400", "2026-03-04", "100:110"))
+    retract.commit()  # conflicts, validates the predicate, replays
+    remaining = repo.read("main").table("granules").scan().to_arrow()
+    print(f"   rows now:    {sorted(remaining['granule_id'].to_pylist())}\n")
+
+    print("7. A tag pins arrays and table version together.")
     repo.repo.create_tag("release-1", anna_snapshot)
     with repo.transaction("main", "later ingest") as tx:
         tx.group["reflectance"][300:310] = np.full(10, 9.0, "f4")
@@ -98,7 +108,7 @@ def main() -> None:
         f"reflectance[300]={latest.group['reflectance'][300]}"
     )
 
-    print("\n7. Icechunk history (each commit carries its table pointer):")
+    print("\n8. Icechunk history (each commit carries its table pointer):")
     for snap in repo.repo.ancestry(branch="main"):
         ptr = (snap.metadata or {}).get(POINTER_KEY, {}).get("granules")
         name = Path(ptr).name if ptr else "-"
