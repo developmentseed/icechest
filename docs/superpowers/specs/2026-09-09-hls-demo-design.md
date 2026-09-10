@@ -203,26 +203,68 @@ Two mechanics follow:
 
 ### Conventions come from the record
 
+These attributes are the only georeferencing the written groups carry, so they
+have to satisfy the conventions' own published schemas — a reader that cannot
+validate them cannot use them. The authority is the schema at each convention's
+`v0.1` tag under `github.com/zarr-conventions/`, fetched and checked while
+writing this section. Where this document previously disagreed with those
+schemas, the schemas win; the corrections are called out below.
+
 `granule_attrs` is pure. Given `proj:epsg`, `proj:shape`, `proj:transform` and a
 level count, it returns:
 
-- `zarr_conventions`: the three convention metadata objects — `multiscales`
-  (uuid `d35379db-88df-4056-af3a-620245f8e347`), `proj:` (uuid
-  `f17cb550-5864-4468-aeb7-f3180cfb622f`), and `spatial:` (uuid
-  `689b58e2-cf7b-45e0-9fff-9cfc0883d6b4`).
-- `proj:code` from `proj:epsg`.
-- `spatial:dimensions` from `proj:shape`, which is `[rows, cols]`.
+- `zarr_conventions`: the three convention metadata objects. Each schema fixes
+  every field of its own object as a `const` and sets
+  `additionalProperties: false`, so these must be reproduced exactly and carry
+  nothing extra:
+
+  | name | uuid | urls |
+  | --- | --- | --- |
+  | `multiscales` | `d35379db-88df-4056-af3a-620245f8e347` | `zarr-conventions/multiscales` @ `v0.1` |
+  | `proj` | `f17cb550-5864-4468-aeb7-f3180cfb622f` | `zarr-conventions/proj` @ `v0.1` |
+  | `spatial` | `689b58e2-cf7b-45e0-9fff-9cfc0883d6b4` | `zarr-conventions/spatial` @ `v0.1` |
+
+  **Corrected:** the names carry no trailing colon — `proj`, not `proj:`. The
+  published tag is `v0.1`, not `v1`, so the previously recorded `refs/tags/v1/`
+  URLs 404. And the proj convention lives at `zarr-conventions/proj`; the
+  `zarr-experimental/geo-proj` location it was recorded under now only
+  redirects.
+
+- `proj:code` from `proj:epsg`, as the authority-qualified string —
+  `"EPSG:32620"`, matching the schema's `EPSG:32633` example.
+- `spatial:shape` from `proj:shape`, as `[height, width]`.
+  **Corrected:** this was previously written to `spatial:dimensions`, which the
+  schema defines as the *names* of the two spatial dimensions, typed as strings
+  (`["y", "x"]`). Putting pixel counts there left a reader looking for the grid
+  size finding nothing, and a reader reading dimension names finding integers.
+- `spatial:dimensions` as `["y", "x"]` — the row-major names the schema asks
+  for.
 - `spatial:transform` from the first six elements of `proj:transform`. The
   archive stores a nine-element row-major affine whose last row is `0, 0, 1`;
-  the convention takes the six that carry the affine.
+  the convention wants the six that carry the affine, `[a, b, c, d, e, f]`,
+  mapping array indices to coordinates. This one was already right.
 - `spatial:bbox` computed from the transform and shape:
   `xmin = transform[2]`, `ymax = transform[5]`,
   `xmax = xmin + cols * transform[0]`, `ymin = ymax + rows * transform[4]`
   (`transform[4]` is negative). This is exact and needs no reprojection library,
   which is why the geographic `bbox` struct is not used for it.
-- `multiscales.layout`: one entry per level, level 0 as `{"asset": "0"}` and each
-  subsequent level carrying `derived_from`, `factors: [2, 2]`, and its scaled
-  transform.
+- `multiscales.layout`: one entry per level. Level 0 is `{"asset": "0"}`; each
+  subsequent level carries `derived_from` naming the level above it and
+  `transform: {"scale": [2, 2]}`.
+  **Corrected:** a layout item's `transform` is an object with `scale` and
+  `translation`, and it is defined *relative to `derived_from`* — so the value
+  is the factor-of-two step between adjacent levels, not the level's absolute
+  affine. The previously specified flat six-element absolute transform is not a
+  valid layout transform at all, and `factors` is not a defined key; it survived
+  only because the schema allows additional properties. A per-level absolute
+  affine does have a defined home if one is wanted later: the spatial convention
+  permits `spatial:shape` and `spatial:transform` as overrides inside a layout
+  item.
+
+`asset` and `derived_from` are paths relative to the group holding the
+`multiscales` attributes, so where those attributes are written determines
+whether the declared paths resolve. Whichever group they land on, the paths
+must reach the arrays actually written.
 
 ### Metadata and data must agree
 
