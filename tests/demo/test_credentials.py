@@ -1,108 +1,92 @@
-"""Earthdata Basic Auth: proactive, not reactive.
+"""Credentials and the container a reference is resolved against.
 
-``lpdaac_credentials`` used to rely on ``urllib.request.HTTPBasicAuthHandler``,
-which only attaches credentials after a 401 challenge. URS's OAuth
-``/authorize`` page never sends one -- it returns the login form directly --
-so that handler never fired and the "credentials" call quietly got HTML back
-instead of JSON. None of that showed up here, because it only breaks against
-the real service; these tests pin the fix down with no network at all, so a
-regression shows up here instead of on someone else's infrastructure months
-from now.
+Token lifecycle and the per-DAAC credential exchange belong to
+``earthaccess-auth``; what is tested here is our side of the seam -- that the
+container is named and pointed correctly for each access mode, and that what
+the library hands back is mapped onto what icechunk expects.
 """
 
 from __future__ import annotations
 
-import base64
-import re
-import urllib.request
+import pickle
+from datetime import UTC, datetime
 
 import pytest
 
 from icechest.demo import credentials
+from icechest.demo.assets import (
+    CONTAINER_NAME,
+    LPDAAC_HTTPS_ASSET_PREFIX,
+    LPDAAC_S3_PREFIX,
+)
 
 
-class _FakeNetrc:
-    """A ``netrc.netrc`` stand-in with a fixed set of entries, no file I/O."""
-
-    def __init__(self, entries):
-        self._entries = entries
-
-    def authenticators(self, host):
-        return self._entries.get(host)
+class FakeS3Credentials:
+    access_key_id = "AKIA-fake"
+    secret_access_key = "secret-fake"
+    session_token = "token-fake"
+    expires_at = datetime(2026, 9, 10, 18, 0, tzinfo=UTC)
 
 
-def _patch_netrc(monkeypatch, entries):
-    monkeypatch.setattr(
-        credentials.netrc, "netrc", lambda *a, **kw: _FakeNetrc(entries)
+class FakeManager:
+    def __init__(self):
+        self.asked_for = None
+
+    def get_bucket_credentials(self, bucket_or_url):
+        self.asked_for = bucket_or_url
+        return FakeS3Credentials()
+
+
+def test_container_is_named_so_references_can_be_relative():
+    """A ``vcc://`` reference names the container; without a name there is
+    nothing for it to resolve against."""
+    for access in ("s3", "https"):
+        container = credentials.virtual_chunk_container(access, token="t")
+        assert container.name == CONTAINER_NAME
+
+
+def test_s3_container_points_at_the_bucket():
+    container = credentials.virtual_chunk_container("s3")
+    assert container.url_prefix == LPDAAC_S3_PREFIX
+
+
+def test_https_container_points_at_the_distribution_endpoint():
+    """The same objects, reachable from outside us-west-2."""
+    container = credentials.virtual_chunk_container("https", token="t")
+    assert container.url_prefix == LPDAAC_HTTPS_ASSET_PREFIX
+
+
+def test_https_container_needs_a_token():
+    """icechunk's HTTP store takes static headers only, so the bearer has to be
+    in hand when the container is built -- there is no callback to fetch it
+    later, and a container without one would 401 on every chunk."""
+    with pytest.raises(ValueError, match="token"):
+        credentials.virtual_chunk_container("https")
+
+
+def test_unknown_access_mode_is_refused():
+    with pytest.raises(ValueError, match="access"):
+        credentials.virtual_chunk_container("ftp")
+
+
+def test_credential_callable_is_picklable():
+    """icechunk requires it: refreshable credentials may cross a process."""
+    assert (
+        pickle.loads(pickle.dumps(credentials.lpdaac_credentials))
+        is credentials.lpdaac_credentials
     )
 
 
-def test_auth_header_is_the_correct_basic_encoding(monkeypatch):
-    _patch_netrc(
-        monkeypatch, {credentials.EARTHDATA_HOST: ("someuser", None, "somepass")}
-    )
+def test_credentials_are_mapped_onto_icechunks_fields(monkeypatch):
+    """The library's expiry drives icechunk's refresh, so a dropped
+    ``expires_at`` would leave icechunk holding a credential past its life."""
+    manager = FakeManager()
+    monkeypatch.setattr(credentials, "default_manager", lambda: manager)
 
-    header = credentials._earthdata_auth_header()
+    result = credentials.lpdaac_credentials()
 
-    assert header == "Basic " + base64.b64encode(b"someuser:somepass").decode()
-
-
-def test_missing_netrc_entry_raises_a_clear_error(monkeypatch):
-    _patch_netrc(monkeypatch, {})
-
-    with pytest.raises(RuntimeError, match=re.escape(credentials.EARTHDATA_HOST)):
-        credentials._earthdata_auth_header()
-
-
-def test_auth_header_is_attached_to_the_first_request_not_after_a_401(monkeypatch):
-    """The whole bug, pinned down: the header must be on the request the
-    opener sends *first* -- there is no second, challenge-response request in
-    this flow for a reactive handler to answer."""
-    _patch_netrc(
-        monkeypatch, {credentials.EARTHDATA_HOST: ("someuser", None, "somepass")}
-    )
-    captured = {}
-
-    class _FakeResponse:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc_info):
-            return False
-
-        def read(self):
-            return (
-                b'{"accessKeyId": "AKIA", "secretAccessKey": "secret", '
-                b'"sessionToken": "token", "expiration": "2026-01-01T00:00:00+00:00"}'
-            )
-
-    class _FakeOpener:
-        def open(self, request, timeout=None):
-            captured["request"] = request
-            return _FakeResponse()
-
-    monkeypatch.setattr(credentials, "_earthdata_opener", lambda: _FakeOpener())
-
-    creds = credentials.lpdaac_credentials()
-
-    request = captured["request"]
-    assert isinstance(request, urllib.request.Request)
-    assert request.get_header("Authorization") == (
-        "Basic " + base64.b64encode(b"someuser:somepass").decode()
-    )
-    # And the round trip actually produced credentials, confirming the fake
-    # opener's response was consumed the same way the real one would be.
-    assert creds.access_key_id == "AKIA"
-
-
-def test_a_missing_netrc_reads_like_a_missing_entry(monkeypatch):
-    """The two ways of not having Earthdata credentials are the same problem to
-    whoever is running this, so they raise the same kind of error -- rather than
-    a bare FileNotFoundError from one branch and a clear message from the other."""
-
-    def missing(*args, **kwargs):
-        raise FileNotFoundError(2, "No such file or directory", "~/.netrc")
-
-    monkeypatch.setattr(credentials.netrc, "netrc", missing)
-    with pytest.raises(RuntimeError, match="no ~/.netrc"):
-        credentials._earthdata_auth_header()
+    assert manager.asked_for == LPDAAC_S3_PREFIX
+    assert result.access_key_id == FakeS3Credentials.access_key_id
+    assert result.secret_access_key == FakeS3Credentials.secret_access_key
+    assert result.session_token == FakeS3Credentials.session_token
+    assert result.expires_after == FakeS3Credentials.expires_at

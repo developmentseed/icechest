@@ -97,3 +97,23 @@ def test_granule_with_no_usable_assets_fails():
             opener=lambda url, registry, ifd: "dataset",
             header_reader=lambda url, registry: build_tiff([(1, 1)]),
         )
+
+
+def test_access_mode_chooses_the_url_the_headers_are_read_through():
+    """Which endpoint a COG is parsed through is the ingesting machine's
+    business; it must not change what ends up in the manifest."""
+    opened = []
+
+    arrays = virtual_granule(
+        row(),
+        registry=None,
+        bands=("B04",),
+        access="https",
+        opener=lambda url, registry, ifd: opened.append(url) or "dataset",
+        header_reader=lambda url, registry: build_tiff([(3660, 3660)]),
+    )
+
+    assert arrays.levels == {"B04": 1}
+    assert all(
+        url.startswith("https://data.lpdaac.earthdatacloud.nasa.gov/") for url in opened
+    )

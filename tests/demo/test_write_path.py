@@ -231,6 +231,36 @@ def test_batch_path_writes_the_same_hierarchy(tmp_path):
     assert snap.table("granules").scan().to_arrow()["array_path"].to_pylist() == [
         f"/{GRANULE}"
     ]
-    assert isinstance(
-        snap.group[f"{GRANULE}/B04/{MULTISCALES_GROUP}/0"], zarr.Array
+    assert isinstance(snap.group[f"{GRANULE}/B04/{MULTISCALES_GROUP}/0"], zarr.Array)
+
+
+def resolved_path(repo, array_path="/{g}/B04/{m}/0"):
+    """The chunk location this reader would fetch, after the resolver runs."""
+    session = repo.readonly_session(branch="main")
+    path = array_path.format(g=GRANULE, m=MULTISCALES_GROUP)
+    batch = next(iter(session.store.array_chunk_iterator(path, 10)))
+    return batch[2][0]
+
+
+def test_reference_resolves_to_whichever_endpoint_the_reader_configured(tmp_path):
+    """The point of a relative reference: one store, written once, readable
+    from us-west-2 over s3 and from anywhere over https. An absolute URL in the
+    manifest would bake in whichever endpoint the writer happened to use."""
+    repo = open_store(tmp_path)
+    tx = repo.transaction("main", "write one granule")
+    write_granule(tx, row(bands=("B04",)), registry=None, bands=("B04",), **seams())
+    tx.session.commit("write one granule")
+
+    over_s3 = resolved_path(open_store(tmp_path).repo)
+    over_https = resolved_path(
+        open_store(tmp_path, access="https", token="a-token").repo
+    )
+
+    assert over_s3.startswith("s3://lp-prod-protected/")
+    assert over_https.startswith(
+        "https://data.lpdaac.earthdatacloud.nasa.gov/lp-prod-protected/"
+    )
+    # Same object either way: only the endpoint differs.
+    assert over_s3.removeprefix("s3://lp-prod-protected/") == over_https.removeprefix(
+        "https://data.lpdaac.earthdatacloud.nasa.gov/lp-prod-protected/"
     )

@@ -4,12 +4,18 @@ from __future__ import annotations
 
 import pickle
 
+import pytest
 from pyiceberg.schema import Schema
 from pyiceberg.table.sorting import SortDirection
 from pyiceberg.transforms import IdentityTransform
 from pyiceberg.types import LongType, NestedField, StringType, TimestamptzType
 
-from icechest.demo.assets import LPDAAC_S3_PREFIX
+from icechest.demo import store
+from icechest.demo.assets import (
+    CONTAINER_NAME,
+    LPDAAC_HTTPS_ASSET_PREFIX,
+    LPDAAC_S3_PREFIX,
+)
 from icechest.demo.credentials import lpdaac_credentials, virtual_chunk_container
 from icechest.demo.store import (
     STAC_HASH_FIELD_ID,
@@ -67,7 +73,6 @@ def test_ensure_table_declares_the_array_path_column(tmp_path):
 def test_source_schema_may_not_collide_with_the_array_path_id():
     """The 'well clear of the archive's ids' comment, made self-checking: two
     fields sharing an id is a schema whose columns cannot be told apart."""
-    import pytest
 
     from icechest.demo.store import ARRAY_PATH_FIELD_ID
 
@@ -126,3 +131,41 @@ def test_table_is_partitioned_by_the_hash_block(tmp_path):
     assert partition_field.source_id == block_id
     assert partition_field.name == "stac_hash_block"
     assert isinstance(partition_field.transform, IdentityTransform)
+
+
+def test_store_declares_the_named_container_for_s3_by_default(tmp_path):
+    """The name is what a vcc:// reference resolves against, so a store whose
+    container is unnamed can read nothing it wrote."""
+    repo = open_store(tmp_path)
+
+    # Keyed by prefix; the name is what a vcc:// reference points at.
+    containers = repo.repo.config.virtual_chunk_containers
+    assert LPDAAC_S3_PREFIX in containers
+    assert containers[LPDAAC_S3_PREFIX].name == CONTAINER_NAME
+
+
+def test_store_can_be_opened_for_https_instead(tmp_path):
+    """Same store, different endpoint: a reader outside us-west-2 resolves the
+    very same references over https."""
+    repo = open_store(tmp_path, access="https", token="a-token")
+
+    containers = repo.repo.config.virtual_chunk_containers
+    assert LPDAAC_HTTPS_ASSET_PREFIX in containers
+    assert containers[LPDAAC_HTTPS_ASSET_PREFIX].name == CONTAINER_NAME
+
+
+def test_https_without_a_token_mints_one(tmp_path, monkeypatch):
+    """Token lifecycle is earthaccess-auth's job, so a caller should not have to
+    hold one; the container still cannot be built without it."""
+    called = []
+
+    def fake_token():
+        called.append(True)
+        return "minted"
+
+    monkeypatch.setattr(store, "earthdata_token", fake_token)
+    repo = open_store(tmp_path, access="https")
+
+    assert called
+    containers = repo.repo.config.virtual_chunk_containers
+    assert containers[LPDAAC_HTTPS_ASSET_PREFIX].name == CONTAINER_NAME

@@ -12,8 +12,11 @@ from pyiceberg.transforms import IdentityTransform
 from pyiceberg.types import LongType, NestedField, StringType
 
 from icechest import HybridRepo
-from icechest.demo.assets import LPDAAC_S3_PREFIX
-from icechest.demo.credentials import lpdaac_credentials, virtual_chunk_container
+from icechest.demo.credentials import (
+    container_credentials,
+    earthdata_token,
+    virtual_chunk_container,
+)
 from icechest.demo.hash import HASH_BLOCK_COLUMN, HASH_COLUMN
 
 #: Well clear of the archive's own field ids, which run into the low hundreds.
@@ -97,26 +100,34 @@ def granules_partition_spec() -> PartitionSpec:
     )
 
 
-def open_store(path: Path | str, *, warehouse: str | None = None) -> HybridRepo:
+def open_store(
+    path: Path | str,
+    *,
+    warehouse: str | None = None,
+    access: str = "s3",
+    token: str | None = None,
+) -> HybridRepo:
     """Open or create the store, with the LP DAAC container declared.
 
-    The container has to exist before any virtual reference is written --
-    ``to_icechunk`` validates it -- so it is configured at open time rather than
-    at write time. Credentials are refreshed lazily, so this needs no network.
+    ``access`` is this reader's choice and nothing more. References are written
+    relative to the container's name, so the same store opened with
+    ``access="s3"`` inside us-west-2 and ``access="https"`` anywhere else
+    resolves the identical references against different endpoints.
+
+    In s3 mode this needs no network: credentials are refreshed lazily through a
+    callable. In https mode a bearer token has to be in hand, because icechunk's
+    HTTP store takes static headers only -- pass one, or leave it to
+    ``earthdata_token()``.
     """
     path = Path(path)
+    if access == "https" and token is None:
+        token = earthdata_token()
     config = icechunk.RepositoryConfig.default()
-    config.set_virtual_chunk_container(virtual_chunk_container())
+    config.set_virtual_chunk_container(virtual_chunk_container(access, token=token))
     repo = icechunk.Repository.open_or_create(
         icechunk.local_filesystem_storage(str(path / "icechunk")),
         config=config,
-        authorize_virtual_chunk_access=icechunk.containers_credentials(
-            {
-                LPDAAC_S3_PREFIX: icechunk.s3_refreshable_credentials(
-                    get_credentials=lpdaac_credentials
-                )
-            }
-        ),
+        authorize_virtual_chunk_access=container_credentials(access),
     )
     return HybridRepo(repo, warehouse or str(path / "warehouse"))
 

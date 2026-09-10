@@ -141,19 +141,28 @@ uv run jupyter lab examples/hls_ingest.ipynb
 ```
 
 It needs a `~/.netrc` entry for `urs.earthdata.nasa.gov` and AWS credentials
-that can read `s3://nasa-maap-data-store`.
+that can read `s3://nasa-maap-data-store`. Token lifecycle and the per-DAAC
+credential exchange are handled by [earthaccess-auth](https://github.com/earthaccess-dev/earthaccess-auth).
 
-**It only runs inside AWS `us-west-2`.** LP DAAC's `lp-prod-protected` bucket
-enforces same-region access, so from a laptop the Earthdata credentials mint
-fine and then every COG read is denied — an opaque `AccessDenied` at the first
-virtualization cell. The live integration test skips for the same reason.
+**Choose how assets are reached.** LP DAAC serves the same COGs two ways, and
+`open_store` takes an `access` argument for it:
 
-That restriction outlives the ingest. `s3://lp-prod-protected/...` is the URL
-recorded in every virtual reference, so **any reader of the published store
-must also be in `us-west-2`** to resolve a chunk. That is a property of the
-source data rather than of icechest — a store built over assets you control is
-readable wherever those assets are — but it is worth knowing before building on
-this one.
+| mode | reachable from | notes |
+| --- | --- | --- |
+| `"s3"` (default) | AWS `us-west-2` only | the fast path; `lp-prod-protected` enforces same-region access, so elsewhere every read is denied |
+| `"https"` | anywhere | reads through LP DAAC's distribution endpoint with an Earthdata bearer token |
+
+**The choice does not reach the data.** References are recorded relative to a
+named virtual chunk container — `vcc://lpdaac/HLSL30.020/...` — with no endpoint
+in them at all. A reader supplies the endpoint by opening the store in whichever
+mode they can use, so one store written on a laptop over https is read in-region
+over s3, and the reverse, without rewriting anything:
+
+```python
+repo = open_store(path, access="https")   # ingest from anywhere
+repo = open_store(path, access="s3")      # read the same store in us-west-2
+```
+
 
 ## Status and open questions
 

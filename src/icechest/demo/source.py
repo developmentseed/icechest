@@ -35,9 +35,7 @@ ARCHIVE_ROOT = (
 DATETIME_FLOOR = "2026-01-01T00:00:00+00:00"
 
 
-def archive_metadata_url(
-    collection: str = "HLSL30_2.0", version: str = "v2"
-) -> str:
+def archive_metadata_url(collection: str = "HLSL30_2.0", version: str = "v2") -> str:
     return (
         f"{ARCHIVE_ROOT}/{version}/{collection}/iceberg/metadata/latest.metadata.json"
     )

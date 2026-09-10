@@ -13,7 +13,7 @@ from typing import Any
 
 import zarr
 
-from icechest.demo.assets import DEFAULT_BANDS, asset_urls
+from icechest.demo.assets import DEFAULT_BANDS, asset_urls, to_vcc_url
 from icechest.demo.conventions import MULTISCALES_GROUP, granule_attrs
 from icechest.demo.tiff import HEADER_BYTES, parse_ifds
 
@@ -51,6 +51,7 @@ def virtual_granule(
     *,
     registry: Any,
     bands: Sequence[str] = DEFAULT_BANDS,
+    access: str = "s3",
     opener: Callable[[str, Any, int], Any] = _open_level,
     header_reader: Callable[[str, Any], bytes] = read_header,
 ) -> GranuleArrays:
@@ -60,7 +61,7 @@ def virtual_granule(
     assumed, because Fmask and the angle bands need not match the spectral
     bands' pyramid depth.
     """
-    urls = asset_urls(row, bands)
+    urls = asset_urls(row, bands, access=access)
     if not urls:
         raise GranuleError(f"{row['id']}: no assets among {tuple(bands)}")
 
@@ -91,6 +92,7 @@ def write_granule(
     *,
     registry: Any,
     bands: Sequence[str] = DEFAULT_BANDS,
+    access: str = "s3",
     opener: Callable[[str, Any, int], Any] = _open_level,
     header_reader: Callable[[str, Any], bytes] = read_header,
 ) -> str:
@@ -113,16 +115,30 @@ def write_granule(
         row,
         registry=registry,
         bands=bands,
+        access=access,
         opener=opener,
         header_reader=header_reader,
     )
     granule_id = row["id"]
     for band, per_level in arrays.datasets.items():
+        # The manifest records the reference, not the URL we happened to read
+        # through: relative to the container's name, so a reader resolves it
+        # against their own endpoint. Every chunk of a level points at the one
+        # asset, so a single replacement path is exactly right.
+        reference = to_vcc_url(row["assets"][band]["href"])
         for _level, dataset in sorted(per_level.items()):
-            dataset.vz.to_icechunk(
+            # validate_containers is off because that check matches container
+            # prefixes literally and does not understand the vcc:// scheme; it
+            # would reject every relative reference. What it was guarding
+            # against -- a reference no container can resolve -- is instead
+            # ruled out by construction: every href goes through asset_key,
+            # which refuses anything outside the container's bucket, before a
+            # single byte is staged.
+            dataset.vz.rename_paths(reference).vz.to_icechunk(
                 store=tx.session.store,
                 group=f"/{granule_id}/{band}/{MULTISCALES_GROUP}",
                 mode="a",
+                validate_containers=False,
             )
         # The attributes live on the band group, one above the levels, so the
         # layout's paths are prefixed with the multiscales group's name.

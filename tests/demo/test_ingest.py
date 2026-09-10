@@ -78,7 +78,7 @@ def _bbox(lon_step):
 def fake_writer(failures=()):
     """Stands in for the real writer, staging a small real array per granule."""
 
-    def writer(tx, row, *, registry, bands):
+    def writer(tx, row, *, registry, bands, access="s3"):
         if row["id"] in failures:
             raise GranuleError(f"{row['id']}: pretend the COG is unreadable")
         group = zarr.open_group(tx.session.store, path=f"/{row['id']}", mode="a")
@@ -147,7 +147,7 @@ def test_batch_where_everything_fails_publishes_nothing(tmp_path):
 def half_writer(failures=()):
     """Stages arrays and only then fails, the way a real multi-band write can."""
 
-    def writer(tx, row, *, registry, bands):
+    def writer(tx, row, *, registry, bands, access="s3"):
         group = zarr.open_group(tx.session.store, path=f"/{row['id']}", mode="a")
         group.create_array("B04", shape=(4,), dtype="uint8", chunks=(4,))[:] = 1
         if row["id"] in failures:

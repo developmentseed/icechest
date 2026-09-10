@@ -65,6 +65,7 @@ def ingest_batch(
     *,
     registry: Any,
     bands: Sequence[str] = DEFAULT_BANDS,
+    access: str = "s3",
     writer: Callable[..., str] = write_granule,
     message: str | None = None,
     name: str = "granules",
@@ -114,7 +115,7 @@ def ingest_batch(
             continue
 
         try:
-            array_path = writer(tx, row, registry=registry, bands=bands)
+            array_path = writer(tx, row, registry=registry, bands=bands, access=access)
         except Exception as error:  # noqa: BLE001 - any failure skips one granule
             reason = str(error)
             # write_granule is not atomic: it can raise after already staging

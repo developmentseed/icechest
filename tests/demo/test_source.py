@@ -60,10 +60,7 @@ def test_bbox_filter_pairs_each_bound_with_the_right_field():
     """A transposed comparison would still mention all four fields, so the
     test has to pin which bound each one is compared against."""
     rendered = {
-        str(term)
-        for term in leaves(
-            granule_filter(bbox=(-67.0, -29.0, -65.0, -27.0))
-        )
+        str(term) for term in leaves(granule_filter(bbox=(-67.0, -29.0, -65.0, -27.0)))
     }
 
     assert str(GreaterThanOrEqual("bbox.xmax", -67.0)) in rendered
@@ -122,7 +119,4 @@ def test_caller_range_starting_before_the_floor_still_gets_the_floor():
         )
     }
     assert str(GreaterThanOrEqual("datetime", DATETIME_FLOOR)) in rendered
-    assert (
-        str(GreaterThanOrEqual("datetime", "2020-01-01T00:00:00+00:00"))
-        in rendered
-    )
+    assert str(GreaterThanOrEqual("datetime", "2020-01-01T00:00:00+00:00")) in rendered
