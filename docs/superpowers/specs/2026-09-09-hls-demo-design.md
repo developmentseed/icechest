@@ -127,7 +127,8 @@ select_granules      -> pa.Table of rows in the archive's schema
     virtual_granule  -> {band: {level: virtual dataset}} + level counts
     granule_attrs    -> convention attributes for the band group
     write            -> ds.vz.to_icechunk(store=tx.session.store,
-                                          group=f"/{id}/{band}/multiscales/{level}")
+                                          group=f"/{id}/{band}/multiscales",
+                                          mode="a")
   tx.append("granules", successful rows + array_path)
   tx.commit()        -> one snapshot carrying both halves
 ```
@@ -265,6 +266,16 @@ level count, it returns:
 `multiscales` attributes, so where those attributes are written determines
 whether the declared paths resolve. Whichever group they land on, the paths
 must reach the arrays actually written.
+
+The attributes land on the band group, `/{id}/{band}`, so the layout's paths
+are `multiscales/0`, `multiscales/1` and so on. That keeps the band — the node
+a reader lands on for one asset — self-describing without descending into the
+pyramid, and keeps the attributes off any group `to_icechunk` itself opens.
+`VirtualTIFF(ifd=n)` names its single variable `str(n)` and `to_icechunk`
+writes variables *inside* the group it is given, so all levels go into one
+shared `multiscales` group and the variable name supplies the level; naming
+the level in the group path too would bury each array one node below
+everything that references it.
 
 ### Metadata and data must agree
 
