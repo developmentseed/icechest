@@ -70,6 +70,17 @@ def test_bbox_filter_pairs_each_bound_with_the_right_field():
     assert str(LessThanOrEqual("bbox.ymin", -27.0)) in rendered
 
 
+def test_require_proj_transform_false_drops_the_not_null_term():
+    """select_granules runs the scan this way: PyIceberg's ArrowScan cannot
+    project a list-typed column that appears only in the row filter, and
+    proj:transform is list<double>. The condition still gets enforced -- just
+    client-side, on the returned Arrow table, instead of pushed into the
+    scan."""
+    rendered = str(granule_filter(require_proj_transform=False))
+    assert DATETIME_FLOOR in rendered
+    assert "proj:transform" not in rendered
+
+
 def test_caller_range_starting_before_the_floor_still_gets_the_floor():
     """A caller asking for 2020 data must not thereby escape the floor: the
     two conditions are conjoined, not substituted."""

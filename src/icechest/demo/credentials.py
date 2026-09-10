@@ -9,6 +9,7 @@ that callable must be picklable, which is why it is a module-level function.
 
 from __future__ import annotations
 
+import base64
 import json
 import netrc
 import urllib.request
@@ -25,26 +26,39 @@ LPDAAC_REGION = "us-west-2"
 
 
 def _earthdata_opener() -> urllib.request.OpenerDirector:
-    """An opener that can follow Earthdata's login redirect.
+    """A cookie-aware opener for following Earthdata's login redirect.
 
-    The credentials endpoint bounces through URS, so both basic auth and a
-    cookie jar are needed for the round trip to complete.
+    Only a cookie jar is needed here: the Basic Auth credentials are attached
+    to the request itself (see ``_earthdata_auth_header``), not to the opener.
+    """
+    return urllib.request.build_opener(urllib.request.HTTPCookieProcessor(CookieJar()))
+
+
+def _earthdata_auth_header() -> str:
+    """Build the ``Authorization`` header value from the ``~/.netrc`` entry.
+
+    The credentials endpoint 307s to URS's OAuth ``/authorize`` page, which
+    accepts HTTP Basic credentials directly and never sends a 401 challenge --
+    so a reactive ``HTTPBasicAuthHandler`` never fires. The header has to be
+    attached to the request up front instead. Unlike ``requests``, urllib does
+    not strip ``Authorization`` when a redirect changes host, which is exactly
+    what lets one header survive the hop to URS and back.
     """
     auth = netrc.netrc().authenticators(EARTHDATA_HOST)
     if auth is None:
         raise RuntimeError(f"no ~/.netrc entry for {EARTHDATA_HOST}")
     username, _, password = auth
-    manager = urllib.request.HTTPPasswordMgrWithDefaultRealm()
-    manager.add_password(None, f"https://{EARTHDATA_HOST}", username, password)
-    return urllib.request.build_opener(
-        urllib.request.HTTPBasicAuthHandler(manager),
-        urllib.request.HTTPCookieProcessor(CookieJar()),
-    )
+    token = base64.b64encode(f"{username}:{password}".encode()).decode()
+    return f"Basic {token}"
 
 
 def lpdaac_credentials() -> icechunk.S3StaticCredentials:
     """Mint temporary S3 credentials for the LP DAAC protected bucket."""
-    with _earthdata_opener().open(LPDAAC_CREDENTIALS_URL, timeout=60) as response:
+    request = urllib.request.Request(
+        LPDAAC_CREDENTIALS_URL,
+        headers={"Authorization": _earthdata_auth_header()},
+    )
+    with _earthdata_opener().open(request, timeout=60) as response:
         payload = json.load(response)
     return icechunk.S3StaticCredentials(
         access_key_id=payload["accessKeyId"],

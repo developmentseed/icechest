@@ -10,6 +10,7 @@ from __future__ import annotations
 import functools
 from typing import TYPE_CHECKING
 
+import pyarrow.compute as pc
 from pyiceberg.expressions import (
     And,
     GreaterThanOrEqual,
@@ -58,17 +59,27 @@ def granule_filter(
     bbox: tuple[float, float, float, float] | None = None,
     tile: str | None = None,
     datetime: tuple[str, str] | None = None,
+    require_proj_transform: bool = True,
 ) -> BooleanExpression:
     """Build the selection predicate.
 
-    The date floor and the not-null condition are always present: a caller's
-    ``datetime`` range is intersected with the floor, never substituted for it.
-    The tile prefix is HLSL30-specific, matching this demo's collection.
+    The date floor is always present: a caller's ``datetime`` range is
+    intersected with the floor, never substituted for it. The tile prefix is
+    HLSL30-specific, matching this demo's collection.
+
+    ``require_proj_transform`` defaults to true so the predicate documents the
+    real selection criterion. ``select_granules`` runs the scan with it false
+    and enforces the same condition client-side instead: PyIceberg 0.11's
+    ``ArrowScan`` cannot project a column that appears *only* in the row
+    filter when that column is list-typed (``prune_columns`` rejects an
+    explicitly-selected non-primitive, non-struct field), and
+    ``proj:transform`` is ``list<double>``.
     """
     terms: list[BooleanExpression] = [
         GreaterThanOrEqual("datetime", DATETIME_FLOOR),
-        NotNull("proj:transform"),
     ]
+    if require_proj_transform:
+        terms.append(NotNull("proj:transform"))
     if datetime is not None:
         start, end = datetime
         terms.append(GreaterThanOrEqual("datetime", start))
@@ -92,9 +103,19 @@ def select_granules(
     datetime: tuple[str, str] | None = None,
     limit: int = 75,
 ) -> pa.Table:
-    """Return granule records in the archive's own schema."""
+    """Return granule records in the archive's own schema.
+
+    The ``proj:transform``-not-null condition is enforced here, on the
+    returned Arrow table, rather than pushed into the scan -- see
+    ``granule_filter``'s docstring for why. The datetime floor already makes
+    every scanned row satisfy it in practice, so this is a defensive check,
+    not a new filtering step.
+    """
     scan = table.scan(
-        row_filter=granule_filter(bbox=bbox, tile=tile, datetime=datetime),
+        row_filter=granule_filter(
+            bbox=bbox, tile=tile, datetime=datetime, require_proj_transform=False
+        ),
         limit=limit,
     )
-    return scan.to_arrow()
+    rows = scan.to_arrow()
+    return rows.filter(pc.is_valid(rows["proj:transform"]))
