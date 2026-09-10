@@ -100,3 +100,35 @@ def test_batch_where_everything_fails_publishes_nothing(tmp_path):
         )
 
     assert repo.read("main").snapshot_id == before
+
+
+def half_writer(failures=()):
+    """Stages arrays and only then fails, the way a real multi-band write can."""
+
+    def writer(tx, row, *, registry, bands):
+        group = zarr.open_group(tx.session.store, path=f"/{row['id']}", mode="a")
+        group.create_array("B04", shape=(4,), dtype="uint8", chunks=(4,))[:] = 1
+        if row["id"] in failures:
+            raise GranuleError(f"{row['id']}: failed after staging two bands")
+        return f"/{row['id']}"
+
+    return writer
+
+
+def test_partially_written_granule_leaves_nothing_behind(tmp_path):
+    """A granule that fails midway must not publish orphaned arrays: the batch
+    commits other granules, so its half-written groups would ride along."""
+    repo = open_store(tmp_path)
+    ensure_table(repo, SOURCE)
+
+    result = ingest_batch(
+        repo, rows("g1", "half", "g3"), registry=None, writer=half_writer(("half",))
+    )
+
+    assert result.committed == ["g1", "g3"]
+    assert "half" in result.skipped
+
+    snap = repo.read("main")
+    ids = snap.table("granules").scan().to_arrow()["id"].to_pylist()
+    assert set(ids) == {"g1", "g3"}
+    assert "half" not in list(snap.group)

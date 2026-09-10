@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import pyarrow as pa
+from zarr.core.sync import sync
 
 from icechest.demo.assets import DEFAULT_BANDS
 from icechest.demo.virtualize import write_granule
@@ -49,14 +50,26 @@ def ingest_batch(
     keep: list[dict[str, Any]] = []
 
     for row in rows.to_pylist():
+        granule_id = row["id"]
         try:
             array_path = writer(tx, row, registry=registry, bands=bands)
         except Exception as error:  # noqa: BLE001 - any failure skips one granule
-            logger.info("skipping %s: %s", row["id"], error)
-            skipped[row["id"]] = str(error)
+            reason = str(error)
+            try:
+                # write_granule is not atomic: it can raise after already
+                # staging some of a granule's bands into the shared session.
+                # Left in place, those orphaned arrays would ride along with
+                # whatever other granules this batch does commit. A cleanup
+                # failure here must not itself abort the batch -- it is
+                # folded into the skip reason instead.
+                sync(tx.session.store.delete_dir(granule_id))
+            except Exception as cleanup_error:  # noqa: BLE001
+                reason = f"{reason} (cleanup also failed: {cleanup_error})"
+            logger.info("skipping %s: %s", granule_id, reason)
+            skipped[granule_id] = reason
             continue
         keep.append({**row, "array_path": array_path})
-        committed.append(row["id"])
+        committed.append(granule_id)
 
     if not keep:
         tx.session.discard_changes()
