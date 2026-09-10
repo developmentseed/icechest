@@ -10,6 +10,7 @@ from typing import Any
 import pyarrow as pa
 import zarr
 from zarr.core.sync import sync
+from zarr.errors import NodeNotFoundError
 
 from icechest.demo.assets import DEFAULT_BANDS
 from icechest.demo.virtualize import write_granule
@@ -28,16 +29,20 @@ class BatchResult:
     skipped: dict[str, str] = field(default_factory=dict)
 
 
-def _granule_group_exists(store: Any, granule_id: str) -> bool:
-    """Is there already a group at ``/{granule_id}`` in this session?
+def _granule_exists(store: Any, granule_id: str) -> bool:
+    """Is there already a node at ``/{granule_id}`` in this session?
 
-    Deliberately asked of the store rather than inferred from an exception:
-    whether a re-write raises at all depends on ``to_icechunk``'s mode, so a
-    check keyed off an error type would go quiet the moment that mode changed.
+    Deliberately asked of the store rather than inferred from an exception the
+    write raised: whether a re-write raises at all depends on ``to_icechunk``'s
+    mode, so a check keyed off an error type would go quiet the moment that
+    mode changed -- which is exactly what happened when the levels moved to
+    ``mode="a"``. Any node counts, not just a group: the question is whether
+    deleting this path could destroy something, and only "nothing is there" is
+    an answer that makes it safe.
     """
     try:
-        zarr.open_group(store, path=granule_id, mode="r")
-    except Exception:  # noqa: BLE001 - "not there" is the only answer we need
+        zarr.open(store=store, path=granule_id, mode="r")
+    except NodeNotFoundError:
         return False
     return True
 
@@ -70,7 +75,7 @@ def ingest_batch(
     published together. Aborting the whole batch for one unreadable COG would
     repeat all the work on retry, which is the wrong trade at archive scale.
 
-    A granule whose group is already in the store is skipped before anything is
+    A granule already in the store is skipped before anything is
     written. This demo only appends -- ``tx.overwrite`` would be the basis of a
     re-ingest flow, and there isn't one -- so re-writing an existing granule
     could only either duplicate its row or destroy the arrays an earlier commit
@@ -91,7 +96,7 @@ def ingest_batch(
                 "arrays are the ones published",
             )
             continue
-        if _granule_group_exists(tx.session.store, granule_id):
+        if _granule_exists(tx.session.store, granule_id):
             _record_skip(
                 skipped,
                 granule_id,
@@ -115,7 +120,7 @@ def ingest_batch(
             # unreadable COG header, a shape mismatch -- leaves nothing there and
             # cleans nothing up. A cleanup failure must not itself abort the
             # batch, so it is folded into the skip reason.
-            if _granule_group_exists(tx.session.store, granule_id):
+            if _granule_exists(tx.session.store, granule_id):
                 try:
                     sync(tx.session.store.delete_dir(granule_id))
                 except Exception as cleanup_error:  # noqa: BLE001
