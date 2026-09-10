@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import pyarrow as pa
 from pyiceberg.expressions import And, GreaterThanOrEqual, LessThanOrEqual
 
 from icechest.demo.source import (
     DATETIME_FLOOR,
+    _drop_null_proj_transform,
     archive_metadata_url,
     granule_filter,
 )
@@ -79,6 +81,30 @@ def test_require_proj_transform_false_drops_the_not_null_term():
     rendered = str(granule_filter(require_proj_transform=False))
     assert DATETIME_FLOOR in rendered
     assert "proj:transform" not in rendered
+
+
+def test_drop_null_proj_transform_keeps_only_populated_rows():
+    """This is the other half of the fix above -- the half that actually
+    enforces the condition once it is no longer pushed into the scan. A pure
+    Arrow table stands in for what the (unfiltered) scan would return: one row
+    with a null transform, as an old, pre-2026 record would carry, and one
+    with a real one."""
+    rows = pa.table(
+        {
+            "id": ["old-granule", "new-granule"],
+            "proj:transform": pa.array(
+                [None, [30.0, 0.0, 199980.0, 0.0, -30.0, -3099960.0]],
+                type=pa.list_(pa.float64()),
+            ),
+        }
+    )
+
+    kept = _drop_null_proj_transform(rows)
+
+    assert kept["id"].to_pylist() == ["new-granule"]
+    assert kept["proj:transform"].to_pylist() == [
+        [30.0, 0.0, 199980.0, 0.0, -30.0, -3099960.0]
+    ]
 
 
 def test_caller_range_starting_before_the_floor_still_gets_the_floor():

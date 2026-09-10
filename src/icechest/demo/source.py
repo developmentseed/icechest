@@ -95,6 +95,17 @@ def granule_filter(
     return functools.reduce(And, terms)
 
 
+def _drop_null_proj_transform(rows: pa.Table) -> pa.Table:
+    """Keep only rows whose ``proj:transform`` is populated.
+
+    Split out from ``select_granules`` so this half of the fix -- the half
+    that actually enforces the condition, as opposed to the half that merely
+    omits it from the pushed-down predicate -- is unit-testable with a plain
+    Arrow table and no archive at all.
+    """
+    return rows.filter(pc.is_valid(rows["proj:transform"]))
+
+
 def select_granules(
     table: StaticTable,
     *,
@@ -110,6 +121,13 @@ def select_granules(
     ``granule_filter``'s docstring for why. The datetime floor already makes
     every scanned row satisfy it in practice, so this is a defensive check,
     not a new filtering step.
+
+    Because of that split, ``limit`` is a bound applied by the scan *before*
+    the null filter runs: it caps how many rows PyIceberg reads, not how many
+    survive. If the datetime-floor assumption above ever stopped holding --
+    some future row past the floor with a null ``proj:transform`` -- a
+    ``limit=N`` call could return fewer than ``N`` rows rather than skipping
+    ahead to find more.
     """
     scan = table.scan(
         row_filter=granule_filter(
@@ -117,5 +135,4 @@ def select_granules(
         ),
         limit=limit,
     )
-    rows = scan.to_arrow()
-    return rows.filter(pc.is_valid(rows["proj:transform"]))
+    return _drop_null_proj_transform(scan.to_arrow())
