@@ -12,6 +12,8 @@ which endpoint mints credentials for which bucket, and how long they last.
 
 from __future__ import annotations
 
+from functools import lru_cache
+
 import icechunk
 from earthaccess_auth import default_manager, login
 
@@ -40,8 +42,14 @@ def lpdaac_credentials() -> icechunk.S3StaticCredentials:
     )
 
 
+@lru_cache(maxsize=1)
 def earthdata_token() -> str:
-    """A bearer token for reading assets over https."""
+    """A bearer token for reading assets over https.
+
+    Cached for the process: the registry and the store each need one, and an
+    EDL token outlives any single run by weeks, so logging in twice buys
+    nothing but a second round trip.
+    """
     return login(strategy="all").token["access_token"]
 
 
@@ -97,7 +105,7 @@ def container_credentials(access: str = "s3"):
     )
 
 
-def object_store_registry(access: str = "s3"):
+def object_store_registry(access: str = "s3", *, token: str | None = None):
     """An obstore registry VirtualiZarr reads COG headers through.
 
     Separate from the container: that one is how a reader resolves a stored
@@ -108,10 +116,17 @@ def object_store_registry(access: str = "s3"):
 
     if access == "https":
         prefix = LPDAAC_HTTPS_ASSET_PREFIX
+        # Built from the prefix without its trailing slash: obstore joins its
+        # base url to a key as ``base + "/" + key``, so keeping the slash sends
+        # every request to ``lp-prod-protected//HLSL30...``, which LP DAAC
+        # answers 404. The registry is still keyed on the prefix as written,
+        # which is the form callers and the container use.
         store = obstore.store.from_url(
-            prefix,
+            prefix.rstrip("/"),
             client_options={
-                "default_headers": {"Authorization": f"Bearer {earthdata_token()}"}
+                "default_headers": {
+                    "Authorization": f"Bearer {token or earthdata_token()}"
+                }
             },
         )
     else:

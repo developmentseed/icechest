@@ -90,3 +90,22 @@ def test_credentials_are_mapped_onto_icechunks_fields(monkeypatch):
     assert result.secret_access_key == FakeS3Credentials.secret_access_key
     assert result.session_token == FakeS3Credentials.session_token
     assert result.expires_after == FakeS3Credentials.expires_at
+
+
+def test_https_store_url_has_no_trailing_slash():
+    """obstore joins its base url with the key as ``base + "/" + key``, so a
+    trailing slash here sends every request to ``lp-prod-protected//HLSL30...``
+    and LP DAAC answers 404."""
+    registry = credentials.object_store_registry("https", token="a-token")
+
+    store, _ = registry.resolve(f"{LPDAAC_HTTPS_ASSET_PREFIX}HLSL30.020/x.tif")
+    assert not store.url.endswith("/")
+
+
+def test_https_registry_resolves_an_asset_to_its_bare_key():
+    """The key is what obstore appends; a leading slash on it would double up
+    just as surely as a trailing one on the base."""
+    registry = credentials.object_store_registry("https", token="a-token")
+
+    _, path = registry.resolve(f"{LPDAAC_HTTPS_ASSET_PREFIX}HLSL30.020/x.tif")
+    assert path == "HLSL30.020/x.tif"
