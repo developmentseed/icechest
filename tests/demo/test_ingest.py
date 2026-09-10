@@ -132,3 +132,81 @@ def test_partially_written_granule_leaves_nothing_behind(tmp_path):
     ids = snap.table("granules").scan().to_arrow()["id"].to_pylist()
     assert set(ids) == {"g1", "g3"}
     assert "half" not in list(snap.group)
+
+
+def test_existing_granule_is_skipped_and_its_arrays_survive(tmp_path):
+    """Re-ingesting a granule must not touch what an earlier commit published.
+
+    The skip path deletes /{id} to clear a half-written granule. If a granule
+    already in the store were allowed into that path, the delete would remove
+    arrays a previous batch committed while its row stayed in the table --
+    breaking the exact invariant this project exists to hold, via the code
+    added to protect it.
+    """
+    repo = open_store(tmp_path)
+    ensure_table(repo, SOURCE)
+    ingest_batch(repo, rows("g1"), registry=None, writer=fake_writer())
+
+    result = ingest_batch(
+        repo, rows("g2", "g1"), registry=None, writer=half_writer(("g1",))
+    )
+
+    assert result.committed == ["g2"]
+    assert "already in the store" in result.skipped["g1"]
+
+    snap = repo.read("main")
+    assert snap.group["g1"]["B04"][0] == 1  # untouched
+    ids = snap.table("granules").scan().to_arrow()["id"].to_pylist()
+    assert sorted(ids) == ["g1", "g2"]  # and not appended twice
+
+
+def test_duplicate_id_within_one_batch_keeps_the_first(tmp_path):
+    """The second occurrence must not overwrite or delete the first's arrays,
+    nor put a second row in the table pointing at the same group."""
+    repo = open_store(tmp_path)
+    ensure_table(repo, SOURCE)
+
+    result = ingest_batch(repo, rows("g1", "g1"), registry=None, writer=fake_writer())
+
+    assert result.committed == ["g1"]
+    assert "already staged earlier in this batch" in result.skipped["g1"]
+
+    snap = repo.read("main")
+    assert snap.group["g1"]["B04"][0] == 1
+    assert snap.table("granules").scan().to_arrow()["id"].to_pylist() == ["g1"]
+
+
+def test_failure_before_any_write_deletes_nothing(tmp_path, monkeypatch):
+    """Nothing was staged, so there is nothing to clean up -- and a delete
+    issued anyway is the blast radius that made the bug above possible."""
+    from icechest.demo import ingest as ingest_module
+
+    deletes = []
+    real_sync = ingest_module.sync
+    monkeypatch.setattr(
+        ingest_module,
+        "sync",
+        lambda coro: (deletes.append(coro) or real_sync(coro)),
+    )
+
+    repo = open_store(tmp_path)
+    ensure_table(repo, SOURCE)
+    ingest_batch(repo, rows("g1", "bad"), registry=None, writer=fake_writer(("bad",)))
+    assert deletes == []
+
+    ingest_batch(repo, rows("h1", "half"), registry=None, writer=half_writer(("half",)))
+    assert len(deletes) == 1  # the one that did stage arrays
+
+
+def test_repeated_failing_id_keeps_every_reason(tmp_path):
+    """Two failures under one id: the second reason must not silently replace
+    the first, which is the only record of what went wrong."""
+    repo = open_store(tmp_path)
+    ensure_table(repo, SOURCE)
+
+    result = ingest_batch(
+        repo, rows("g1", "bad", "bad"), registry=None, writer=fake_writer(("bad",))
+    )
+
+    assert result.committed == ["g1"]
+    assert result.skipped["bad"].count("unreadable") == 2
