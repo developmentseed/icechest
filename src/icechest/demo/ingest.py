@@ -131,5 +131,13 @@ def ingest_batch(
 
     schema = repo.read("main").table(name).schema().as_arrow()
     tx.append(name, pa.Table.from_pylist(keep, schema=schema))
-    snapshot_id = tx.commit()
+    try:
+        snapshot_id = tx.commit()
+    except Exception:
+        # commit() publishes nothing when it raises but leaves the session live
+        # for a caller who is not using the transaction as a context manager --
+        # and this one is not. Drop the staged arrays rather than leave them to
+        # ride along with whatever the caller does with the repo next.
+        tx.session.discard_changes()
+        raise
     return BatchResult(snapshot_id=snapshot_id, committed=committed, skipped=skipped)

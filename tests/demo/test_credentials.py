@@ -93,3 +93,16 @@ def test_auth_header_is_attached_to_the_first_request_not_after_a_401(monkeypatc
     # And the round trip actually produced credentials, confirming the fake
     # opener's response was consumed the same way the real one would be.
     assert creds.access_key_id == "AKIA"
+
+
+def test_a_missing_netrc_reads_like_a_missing_entry(monkeypatch):
+    """The two ways of not having Earthdata credentials are the same problem to
+    whoever is running this, so they raise the same kind of error -- rather than
+    a bare FileNotFoundError from one branch and a clear message from the other."""
+
+    def missing(*args, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory", "~/.netrc")
+
+    monkeypatch.setattr(credentials.netrc, "netrc", missing)
+    with pytest.raises(RuntimeError, match="no ~/.netrc"):
+        credentials._earthdata_auth_header()

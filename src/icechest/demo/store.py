@@ -13,6 +13,8 @@ from icechest.demo.assets import LPDAAC_S3_PREFIX
 from icechest.demo.credentials import lpdaac_credentials, virtual_chunk_container
 
 #: Well clear of the archive's own field ids, which run into the low hundreds.
+#: ``granules_schema`` checks that claim against the schema it is handed, since
+#: two fields sharing an id is a schema whose columns cannot be told apart.
 ARRAY_PATH_FIELD_ID = 1000
 
 
@@ -22,6 +24,11 @@ def granules_schema(source: Schema) -> Schema:
     Kept verbatim otherwise: curating a subset would reintroduce exactly the
     bespoke metadata modelling this project exists to avoid.
     """
+    if source.highest_field_id >= ARRAY_PATH_FIELD_ID:
+        raise ValueError(
+            f"the source schema uses field id {source.highest_field_id}, which "
+            f"collides with array_path's {ARRAY_PATH_FIELD_ID}; pick a higher id"
+        )
     return Schema(
         *source.fields,
         NestedField(

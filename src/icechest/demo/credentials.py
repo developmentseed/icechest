@@ -44,7 +44,14 @@ def _earthdata_auth_header() -> str:
     not strip ``Authorization`` when a redirect changes host, which is exactly
     what lets one header survive the hop to URS and back.
     """
-    auth = netrc.netrc().authenticators(EARTHDATA_HOST)
+    try:
+        auth = netrc.netrc().authenticators(EARTHDATA_HOST)
+    except FileNotFoundError as error:
+        # No file and no entry in the file are the same problem to whoever is
+        # running this, so they get the same answer.
+        raise RuntimeError(
+            f"no ~/.netrc to read {EARTHDATA_HOST} credentials from"
+        ) from error
     if auth is None:
         raise RuntimeError(f"no ~/.netrc entry for {EARTHDATA_HOST}")
     username, _, password = auth

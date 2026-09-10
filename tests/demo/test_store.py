@@ -55,3 +55,22 @@ def test_ensure_table_declares_the_array_path_column(tmp_path):
     ensure_table(repo, SOURCE)
     table = repo.read("main").table("granules")
     assert "array_path" in [field.name for field in table.schema().fields]
+
+
+def test_source_schema_may_not_collide_with_the_array_path_id():
+    """The 'well clear of the archive's ids' comment, made self-checking: two
+    fields sharing an id is a schema whose columns cannot be told apart."""
+    import pytest
+
+    from icechest.demo.store import ARRAY_PATH_FIELD_ID
+
+    colliding = Schema(
+        NestedField(
+            field_id=ARRAY_PATH_FIELD_ID,
+            name="id",
+            field_type=StringType(),
+            required=False,
+        )
+    )
+    with pytest.raises(ValueError, match="array_path"):
+        granules_schema(colliding)
