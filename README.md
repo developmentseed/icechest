@@ -143,6 +143,18 @@ uv run jupyter lab examples/hls_ingest.ipynb
 It needs a `~/.netrc` entry for `urs.earthdata.nasa.gov` and AWS credentials
 that can read `s3://nasa-maap-data-store`.
 
+**It only runs inside AWS `us-west-2`.** LP DAAC's `lp-prod-protected` bucket
+enforces same-region access, so from a laptop the Earthdata credentials mint
+fine and then every COG read is denied — an opaque `AccessDenied` at the first
+virtualization cell. The live integration test skips for the same reason.
+
+That restriction outlives the ingest. `s3://lp-prod-protected/...` is the URL
+recorded in every virtual reference, so **any reader of the published store
+must also be in `us-west-2`** to resolve a chunk. That is a property of the
+source data rather than of icechest — a store built over assets you control is
+readable wherever those assets are — but it is worth knowing before building on
+this one.
+
 ## Status and open questions
 
 Todo:
