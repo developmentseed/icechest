@@ -128,6 +128,21 @@ uv run pytest
 uv run python examples/concurrent_writers.py
 ```
 
+### The HLS demo
+
+`examples/hls_ingest.ipynb` walks the whole pipeline a cell at a time: select
+STAC records from the MAAP HLS archive, rewrite their asset hrefs, read each
+COG's pyramid depth, build the convention attributes, and commit a batch of
+granules -- metadata and virtual arrays together -- into a local store.
+
+```bash
+uv sync --extra demo
+uv run jupyter lab examples/hls_ingest.ipynb
+```
+
+It needs a `~/.netrc` entry for `urs.earthdata.nasa.gov` and AWS credentials
+that can read `s3://nasa-maap-data-store`.
+
 ## Status and open questions
 
 Todo:
