@@ -38,14 +38,26 @@ def test_three_conventions_are_declared():
 def test_multiscale_layout_scales_each_level():
     layout = multiscale_layout(TRANSFORM[:6], levels=5)
     assert len(layout) == 5
-    assert layout[0] == {"asset": "0"}
-    assert layout[1]["derived_from"] == "0"
+    assert layout[0] == {"asset": "multiscales/0"}
+    assert layout[1]["derived_from"] == "multiscales/0"
     assert layout[1]["factors"] == [2, 2]
     # Level n's pixel size is 2**n times level 0's; the origin never moves.
     assert layout[1]["transform"] == [60.0, 0.0, 199980.0, 0.0, -60.0, -3099960.0]
     assert layout[4]["transform"] == [480.0, 0.0, 199980.0, 0.0, -480.0, -3099960.0]
-    assert layout[4]["derived_from"] == "3"
+    assert layout[4]["derived_from"] == "multiscales/3"
 
 
 def test_single_level_layout_has_no_derived_entries():
-    assert multiscale_layout(TRANSFORM[:6], levels=1) == [{"asset": "0"}]
+    assert multiscale_layout(TRANSFORM[:6], levels=1) == [{"asset": "multiscales/0"}]
+
+
+def test_layout_paths_are_relative_to_the_group_carrying_the_attributes():
+    """The attributes go on the band group; the levels live one below it, in
+    the ``multiscales`` group. A bare ``"0"`` would name a sibling that does
+    not exist."""
+    layout = multiscale_layout(TRANSFORM[:6], levels=3)
+    assert [entry["asset"] for entry in layout] == [
+        "multiscales/0",
+        "multiscales/1",
+        "multiscales/2",
+    ]

@@ -14,7 +14,7 @@ from typing import Any
 import zarr
 
 from icechest.demo.assets import DEFAULT_BANDS, asset_urls
-from icechest.demo.conventions import granule_attrs
+from icechest.demo.conventions import MULTISCALES_GROUP, granule_attrs
 from icechest.demo.tiff import HEADER_BYTES, parse_ifds
 
 
@@ -91,20 +91,41 @@ def write_granule(
     *,
     registry: Any,
     bands: Sequence[str] = DEFAULT_BANDS,
+    opener: Callable[[str, Any, int], Any] = _open_level,
+    header_reader: Callable[[str, Any], bytes] = read_header,
 ) -> str:
     """Stage one granule's arrays and conventions, returning its group path.
 
     Writes into the transaction's own session, so the references are staged
     alongside the table pointer and published by the same commit.
+
+    ``VirtualTIFF(ifd=n)`` yields a single-variable dataset whose variable is
+    named ``str(n)``, and ``to_icechunk`` writes variables *inside* the group it
+    is given -- so every level goes into one shared ``multiscales`` group and
+    the variable name supplies the level. Naming the level in the group path as
+    well would bury each array one node deeper than the layout declares it.
+
+    The seams are forwarded from :func:`virtual_granule` so this whole path --
+    the nesting and the attribute placement included -- can be driven without a
+    COG.
     """
-    arrays = virtual_granule(row, registry=registry, bands=bands)
+    arrays = virtual_granule(
+        row,
+        registry=registry,
+        bands=bands,
+        opener=opener,
+        header_reader=header_reader,
+    )
     granule_id = row["id"]
     for band, per_level in arrays.datasets.items():
-        for level, dataset in per_level.items():
+        for _level, dataset in sorted(per_level.items()):
             dataset.vz.to_icechunk(
                 store=tx.session.store,
-                group=f"/{granule_id}/{band}/multiscales/{level}",
+                group=f"/{granule_id}/{band}/{MULTISCALES_GROUP}",
+                mode="a",
             )
+        # The attributes live on the band group, one above the levels, so the
+        # layout's paths are prefixed with the multiscales group's name.
         group = zarr.open_group(
             tx.session.store, path=f"/{granule_id}/{band}", mode="a"
         )

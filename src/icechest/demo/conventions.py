@@ -36,21 +36,38 @@ SPATIAL_CONVENTION: dict[str, str] = {
 }
 
 
+#: The group each band's resolution levels are written into, as a child of the
+#: band group. One constant governs both the path written and the paths
+#: declared, because a layout entry naming a path nothing was written to is a
+#: pyramid declaration that points at nothing.
+MULTISCALES_GROUP = "multiscales"
+
+#: ``asset`` and ``derived_from`` are relative to the group carrying these
+#: attributes, which is the band group -- one above the levels themselves.
+LEVEL_ASSET_PREFIX = f"{MULTISCALES_GROUP}/"
+
+
 def multiscale_layout(
-    transform: Sequence[float], levels: int
+    transform: Sequence[float],
+    levels: int,
+    *,
+    prefix: str = LEVEL_ASSET_PREFIX,
 ) -> list[dict[str, Any]]:
     """Describe the COG's overview pyramid, one entry per resolution level.
 
     Each overview halves both dimensions, so level *n* has pixels 2**n times
     larger than level 0 while sharing its origin.
+
+    ``prefix`` is prepended to every path, because the paths are resolved
+    relative to whichever group these attributes are written to.
     """
-    layout: list[dict[str, Any]] = [{"asset": "0"}]
+    layout: list[dict[str, Any]] = [{"asset": f"{prefix}0"}]
     for level in range(1, levels):
         factor = 2**level
         layout.append(
             {
-                "asset": str(level),
-                "derived_from": str(level - 1),
+                "asset": f"{prefix}{level}",
+                "derived_from": f"{prefix}{level - 1}",
                 "factors": [2, 2],
                 "transform": [
                     transform[0] * factor,
@@ -71,6 +88,7 @@ def granule_attrs(
     shape: Sequence[int],
     transform: Sequence[float],
     levels: int,
+    prefix: str = LEVEL_ASSET_PREFIX,
 ) -> dict[str, Any]:
     """Build the convention attributes for one band group.
 
@@ -94,5 +112,5 @@ def granule_attrs(
         "spatial:dimensions": [rows, cols],
         "spatial:transform": affine,
         "spatial:bbox": [xmin, ymin, xmax, ymax],
-        "multiscales": {"layout": multiscale_layout(affine, levels)},
+        "multiscales": {"layout": multiscale_layout(affine, levels, prefix=prefix)},
     }
