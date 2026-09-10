@@ -20,6 +20,8 @@ from typing import TYPE_CHECKING, Any
 
 import icechunk
 import zarr
+from pyiceberg.partitioning import UNPARTITIONED_PARTITION_SPEC, PartitionSpec
+from pyiceberg.table.sorting import UNSORTED_SORT_ORDER, SortOrder
 
 from icechest.catalog import IcechunkCatalog
 from icechest.convention import TableBinding, declare, read_bindings
@@ -65,6 +67,8 @@ class CreateTable(TableIntent):
     schema: Schema | pa.Schema
     location: str
     properties: dict[str, str] = field(default_factory=dict)
+    partition_spec: PartitionSpec = UNPARTITIONED_PARTITION_SPEC
+    sort_order: SortOrder = UNSORTED_SORT_ORDER
 
     def apply(self, catalog: IcechunkCatalog) -> None:
         if catalog.table_exists(self.name):
@@ -73,6 +77,8 @@ class CreateTable(TableIntent):
             self.name,
             self.schema,
             location=self.location,
+            partition_spec=self.partition_spec,
+            sort_order=self.sort_order,
             properties=self.properties,
         )
 
@@ -193,6 +199,8 @@ class HybridTransaction:
         *,
         location: str | None = None,
         properties: dict[str, str] | None = None,
+        partition_spec: PartitionSpec = UNPARTITIONED_PARTITION_SPEC,
+        sort_order: SortOrder = UNSORTED_SORT_ORDER,
     ) -> None:
         """Create a table and declare it on the Zarr group.
 
@@ -200,10 +208,22 @@ class HybridTransaction:
         convention, so the store is self-describing: a reader discovers the
         table from the Zarr hierarchy alone, with no catalog and no
         out-of-band configuration.
+
+        Partitioning and sort order are fixed when a table is created, so they
+        have to be given here; there is no later call that can add them.
         """
         location = (location or f"{self._repo.warehouse}/{name}").rstrip("/")
         declare(self.group, {name: TableBinding(location=location)})
-        self._intents.append(CreateTable(name, schema, location, properties or {}))
+        self._intents.append(
+            CreateTable(
+                name,
+                schema,
+                location,
+                properties or {},
+                partition_spec=partition_spec,
+                sort_order=sort_order,
+            )
+        )
 
     def append(self, name: str, data: pa.Table) -> None:
         """Append rows to a table. Appends are what the retry loop can replay."""

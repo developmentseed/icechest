@@ -13,6 +13,7 @@ from zarr.core.sync import sync
 from zarr.errors import NodeNotFoundError
 
 from icechest.demo.assets import DEFAULT_BANDS
+from icechest.demo.hash import HASH_COLUMN, with_stac_hash
 from icechest.demo.virtualize import write_granule
 
 logger = logging.getLogger(__name__)
@@ -80,7 +81,14 @@ def ingest_batch(
     re-ingest flow, and there isn't one -- so re-writing an existing granule
     could only either duplicate its row or destroy the arrays an earlier commit
     already published, and the cleanup path below would do exactly the latter.
+
+    The hash is computed for the whole batch up front, so a row carries it into
+    every later step. Unlike a granule that cannot be virtualized, a row with no
+    bbox fails the batch rather than being skipped: it raises here, before
+    anything is staged, and a STAC item without a footprint is a malformed
+    record rather than an expected one.
     """
+    rows = with_stac_hash(rows)
     tx = repo.transaction("main", message or f"ingest {rows.num_rows} granules")
     committed: list[str] = []
     skipped: dict[str, str] = {}
@@ -135,7 +143,13 @@ def ingest_batch(
         raise BatchFailed(f"all {rows.num_rows} granules failed: {skipped}")
 
     schema = repo.read("main").table(name).schema().as_arrow()
-    tx.append(name, pa.Table.from_pylist(keep, schema=schema))
+    # Sorted here because PyIceberg's write path does not consult the table's
+    # declared sort order. Without this the declaration would be a claim the
+    # files do not honour, and a file's min/max hash would bound nothing useful.
+    batch = pa.Table.from_pylist(keep, schema=schema).sort_by(
+        [(HASH_COLUMN, "ascending")]
+    )
+    tx.append(name, batch)
     try:
         snapshot_id = tx.commit()
     except Exception:

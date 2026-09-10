@@ -2,11 +2,21 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pyarrow as pa
 import pytest
 import zarr
 from pyiceberg.schema import Schema
-from pyiceberg.types import IntegerType, ListType, NestedField, StringType
+from pyiceberg.types import (
+    DoubleType,
+    IntegerType,
+    ListType,
+    NestedField,
+    StringType,
+    StructType,
+    TimestamptzType,
+)
 
 from icechest.demo.ingest import BatchFailed, ingest_batch
 from icechest.demo.store import ensure_table, open_store
@@ -23,14 +33,46 @@ SOURCE = Schema(
         ),
         required=False,
     ),
+    NestedField(
+        field_id=5, name="datetime", field_type=TimestamptzType(), required=False
+    ),
+    NestedField(
+        field_id=6,
+        name="bbox",
+        field_type=StructType(
+            NestedField(field_id=7, name="xmin", field_type=DoubleType()),
+            NestedField(field_id=8, name="ymin", field_type=DoubleType()),
+            NestedField(field_id=9, name="xmax", field_type=DoubleType()),
+            NestedField(field_id=10, name="ymax", field_type=DoubleType()),
+        ),
+        required=False,
+    ),
 )
 
 
-def rows(*ids):
+def rows(*ids, at=None):
+    """Granule rows. Each id is placed at a distinct longitude so the rows have
+    distinct hashes, and `at` lets a test control the order they arrive in."""
+    at = at or {}
     return pa.Table.from_pylist(
-        [{"id": i, "proj:epsg": 32620, "proj:shape": [10, 10]} for i in ids],
+        [
+            {
+                "id": i,
+                "proj:epsg": 32620,
+                "proj:shape": [10, 10],
+                "datetime": datetime(2026, 1, 4, tzinfo=UTC),
+                "bbox": _bbox(at.get(i, index)),
+            }
+            for index, i in enumerate(ids)
+        ],
         schema=SOURCE.as_arrow(),
     )
+
+
+def _bbox(lon_step):
+    """A one-degree footprint, stepped east so each granule differs."""
+    lon = -100.0 + float(lon_step)
+    return {"xmin": lon, "ymin": 10.0, "xmax": lon + 1.0, "ymax": 11.0}
 
 
 def fake_writer(failures=()):
@@ -186,7 +228,7 @@ def test_failure_before_any_write_deletes_nothing(tmp_path, monkeypatch):
     monkeypatch.setattr(
         ingest_module,
         "sync",
-        lambda coro: (deletes.append(coro) or real_sync(coro)),
+        lambda coro: deletes.append(coro) or real_sync(coro),
     )
 
     repo = open_store(tmp_path)
@@ -210,3 +252,34 @@ def test_repeated_failing_id_keeps_every_reason(tmp_path):
 
     assert result.committed == ["g1"]
     assert result.skipped["bad"].count("unreadable") == 2
+
+
+def test_rows_are_appended_in_hash_order(tmp_path):
+    """The table declares a sort order, but PyIceberg's write path ignores it,
+    so the batch is sorted here. Without this the declared order is a lie and
+    a file's min/max hash tells a reader nothing useful."""
+    repo = open_store(tmp_path)
+    ensure_table(repo, SOURCE)
+
+    # Arrive deliberately out of order: c is furthest west, a furthest east.
+    ingest_batch(
+        repo,
+        rows("a", "b", "c", at={"a": 30, "b": 15, "c": 0}),
+        registry=None,
+        writer=fake_writer(),
+    )
+
+    table = repo.read("main").table("granules").scan().to_arrow()
+    hashes = table["stac_hash"].to_pylist()
+    assert hashes == sorted(hashes)
+    assert len(set(hashes)) == 3
+
+
+def test_every_committed_row_carries_a_hash(tmp_path):
+    repo = open_store(tmp_path)
+    ensure_table(repo, SOURCE)
+
+    ingest_batch(repo, rows("a", "b"), registry=None, writer=fake_writer())
+
+    table = repo.read("main").table("granules").scan().to_arrow()
+    assert table["stac_hash"].null_count == 0

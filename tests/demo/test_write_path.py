@@ -13,6 +13,7 @@ store is opened. Nothing reads the referenced object.
 from __future__ import annotations
 
 import functools
+from datetime import UTC, datetime
 
 import pyarrow as pa
 import pytest
@@ -26,6 +27,7 @@ from pyiceberg.types import (
     NestedField,
     StringType,
     StructType,
+    TimestamptzType,
 )
 from virtualizarr.manifests import ChunkManifest, ManifestArray
 from zarr.codecs import BytesCodec
@@ -64,6 +66,20 @@ SOURCE = Schema(
         name="proj:transform",
         field_type=ListType(
             element_id=6, element_type=DoubleType(), element_required=False
+        ),
+        required=False,
+    ),
+    NestedField(
+        field_id=20, name="datetime", field_type=TimestamptzType(), required=False
+    ),
+    NestedField(
+        field_id=21,
+        name="bbox",
+        field_type=StructType(
+            NestedField(field_id=22, name="xmin", field_type=DoubleType()),
+            NestedField(field_id=23, name="ymin", field_type=DoubleType()),
+            NestedField(field_id=24, name="xmax", field_type=DoubleType()),
+            NestedField(field_id=25, name="ymax", field_type=DoubleType()),
         ),
         required=False,
     ),
@@ -121,6 +137,9 @@ def row(bands=("B04", "B03")):
         "proj:epsg": 32620,
         "proj:shape": [500, 800],
         "proj:transform": [30.0, 0.0, 199980.0, 0.0, -30.0, -3099960.0, 0.0, 0.0, 1.0],
+        # datetime and bbox are what the stac_hash column is computed from.
+        "datetime": datetime(2026, 1, 4, tzinfo=UTC),
+        "bbox": {"xmin": -66.1, "ymin": -29.0, "xmax": -65.3, "ymax": -28.0},
         "assets": {band: {"href": HREF} for band in bands},
     }
 
