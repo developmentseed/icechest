@@ -61,3 +61,27 @@ def test_stops_when_the_chain_leaves_the_fetched_header():
     data = build_tiff([(3660, 3660), (1830, 1830)])
     first_ifd_end = 8 + (2 + 2 * 12 + 4)
     assert parse_ifds(data[:first_ifd_end]) == [(3660, 3660)]
+
+
+def test_rejects_a_response_too_short_to_hold_a_header():
+    """An empty or truncated range response must say so, not IndexError."""
+    with pytest.raises(ValueError, match="not a TIFF"):
+        parse_ifds(b"II*")
+
+
+def test_rejects_bigtiff():
+    """BigTIFF is version 43 and has a different header layout. HLS COGs are
+    classic TIFF, but saying so beats misreading the offsets of one that isn't."""
+    with pytest.raises(ValueError, match="unsupported version"):
+        parse_ifds(struct.pack("<2sHI", b"II", 43, 8))
+
+
+def test_stops_when_the_buffer_cuts_inside_an_ifd():
+    """The other truncation case: the range response lands mid-entry-array
+    rather than cleanly before the next IFD, so the inner guard is what stops
+    the walk."""
+    data = build_tiff([(3660, 3660), (1830, 1830)])
+    ifd_size = 2 + 2 * 12 + 4
+    # Cut two bytes into the second IFD's entry array: its count is readable,
+    # but its entries and next-offset are not.
+    assert parse_ifds(data[: 8 + ifd_size + 4]) == [(3660, 3660)]
