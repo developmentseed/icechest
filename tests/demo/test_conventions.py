@@ -21,41 +21,50 @@ def test_transform_keeps_only_the_affine_terms():
     assert attrs["spatial:transform"] == TRANSFORM[:6]
 
 
-def test_dimensions_and_code():
+def test_shape_is_the_pixel_counts_and_dimensions_are_their_names():
+    """The schema types ``spatial:dimensions`` as the two dimension *names*.
+    Pixel counts there left a reader after the grid size finding nothing and a
+    reader after the names finding integers."""
     attrs = granule_attrs(epsg=32620, shape=SHAPE, transform=TRANSFORM, levels=5)
-    assert attrs["spatial:dimensions"] == [3660, 3660]
+    assert attrs["spatial:shape"] == [3660, 3660]
+    assert attrs["spatial:dimensions"] == ["y", "x"]
     assert attrs["proj:code"] == "EPSG:32620"
 
 
 def test_three_conventions_are_declared():
     attrs = granule_attrs(epsg=32620, shape=SHAPE, transform=TRANSFORM, levels=5)
     names = [c["name"] for c in attrs["zarr_conventions"]]
-    assert names == ["multiscales", "proj:", "spatial:"]
+    assert names == ["multiscales", "proj", "spatial"]
     uuids = {c["uuid"] for c in attrs["zarr_conventions"]}
     assert "d35379db-88df-4056-af3a-620245f8e347" in uuids
 
 
-def test_multiscale_layout_scales_each_level():
-    layout = multiscale_layout(TRANSFORM[:6], levels=5)
+def test_layout_transform_is_the_step_from_the_level_it_derives_from():
+    """A layout ``transform`` is relative to ``derived_from``, so it is the
+    factor-of-two step between adjacent levels -- not the level's absolute
+    affine, which is not a valid layout transform at all."""
+    layout = multiscale_layout(levels=5)
     assert len(layout) == 5
     assert layout[0] == {"asset": "multiscales/0"}
-    assert layout[1]["derived_from"] == "multiscales/0"
-    assert layout[1]["factors"] == [2, 2]
-    # Level n's pixel size is 2**n times level 0's; the origin never moves.
-    assert layout[1]["transform"] == [60.0, 0.0, 199980.0, 0.0, -60.0, -3099960.0]
-    assert layout[4]["transform"] == [480.0, 0.0, 199980.0, 0.0, -480.0, -3099960.0]
+    assert layout[1] == {
+        "asset": "multiscales/1",
+        "derived_from": "multiscales/0",
+        "transform": {"scale": [2, 2]},
+    }
     assert layout[4]["derived_from"] == "multiscales/3"
+    assert layout[4]["transform"] == {"scale": [2, 2]}
+    assert all("factors" not in entry for entry in layout)
 
 
 def test_single_level_layout_has_no_derived_entries():
-    assert multiscale_layout(TRANSFORM[:6], levels=1) == [{"asset": "multiscales/0"}]
+    assert multiscale_layout(levels=1) == [{"asset": "multiscales/0"}]
 
 
 def test_layout_paths_are_relative_to_the_group_carrying_the_attributes():
     """The attributes go on the band group; the levels live one below it, in
     the ``multiscales`` group. A bare ``"0"`` would name a sibling that does
     not exist."""
-    layout = multiscale_layout(TRANSFORM[:6], levels=3)
+    layout = multiscale_layout(levels=3)
     assert [entry["asset"] for entry in layout] == [
         "multiscales/0",
         "multiscales/1",

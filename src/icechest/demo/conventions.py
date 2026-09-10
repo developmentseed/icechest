@@ -11,27 +11,33 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
+#: Each convention's schema fixes every field of its metadata object as a
+#: ``const`` and sets ``additionalProperties: false``, so these are reproduced
+#: exactly and carry nothing extra. The published tag is ``v0.1``, the names
+#: carry no trailing colon -- the colon belongs to the attribute keys, not the
+#: convention -- and proj lives under ``zarr-conventions``, not the
+#: ``zarr-experimental/geo-proj`` location that now only redirects.
 MULTISCALES_CONVENTION: dict[str, str] = {
-    "schema_url": "https://raw.githubusercontent.com/zarr-conventions/multiscales/refs/tags/v1/schema.json",
-    "spec_url": "https://github.com/zarr-conventions/multiscales/blob/v1/README.md",
+    "schema_url": "https://raw.githubusercontent.com/zarr-conventions/multiscales/refs/tags/v0.1/schema.json",
+    "spec_url": "https://github.com/zarr-conventions/multiscales/blob/v0.1/README.md",
     "uuid": "d35379db-88df-4056-af3a-620245f8e347",
     "name": "multiscales",
     "description": "Multiscale layout of zarr datasets",
 }
 
 PROJ_CONVENTION: dict[str, str] = {
-    "schema_url": "https://raw.githubusercontent.com/zarr-experimental/geo-proj/refs/tags/v1/schema.json",
-    "spec_url": "https://github.com/zarr-experimental/geo-proj/blob/v1/README.md",
+    "schema_url": "https://raw.githubusercontent.com/zarr-conventions/proj/refs/tags/v0.1/schema.json",
+    "spec_url": "https://github.com/zarr-conventions/proj/blob/v0.1/README.md",
     "uuid": "f17cb550-5864-4468-aeb7-f3180cfb622f",
-    "name": "proj:",
+    "name": "proj",
     "description": "Coordinate reference system information for geospatial data",
 }
 
 SPATIAL_CONVENTION: dict[str, str] = {
-    "schema_url": "https://raw.githubusercontent.com/zarr-conventions/spatial/refs/tags/v1/schema.json",
-    "spec_url": "https://github.com/zarr-conventions/spatial/blob/v1/README.md",
+    "schema_url": "https://raw.githubusercontent.com/zarr-conventions/spatial/refs/tags/v0.1/schema.json",
+    "spec_url": "https://github.com/zarr-conventions/spatial/blob/v0.1/README.md",
     "uuid": "689b58e2-cf7b-45e0-9fff-9cfc0883d6b4",
-    "name": "spatial:",
+    "name": "spatial",
     "description": "Spatial coordinate information",
 }
 
@@ -48,35 +54,29 @@ LEVEL_ASSET_PREFIX = f"{MULTISCALES_GROUP}/"
 
 
 def multiscale_layout(
-    transform: Sequence[float],
     levels: int,
     *,
     prefix: str = LEVEL_ASSET_PREFIX,
 ) -> list[dict[str, Any]]:
     """Describe the COG's overview pyramid, one entry per resolution level.
 
-    Each overview halves both dimensions, so level *n* has pixels 2**n times
-    larger than level 0 while sharing its origin.
+    A layout entry's ``transform`` is defined *relative to* ``derived_from``,
+    so each overview's step from the level above it is a factor of two in both
+    axes -- not the level's absolute affine, which is not a valid layout
+    transform at all. A per-level absolute affine has a home if one is ever
+    wanted: the spatial convention permits ``spatial:shape`` and
+    ``spatial:transform`` overrides inside a layout item.
 
     ``prefix`` is prepended to every path, because the paths are resolved
     relative to whichever group these attributes are written to.
     """
     layout: list[dict[str, Any]] = [{"asset": f"{prefix}0"}]
     for level in range(1, levels):
-        factor = 2**level
         layout.append(
             {
                 "asset": f"{prefix}{level}",
                 "derived_from": f"{prefix}{level - 1}",
-                "factors": [2, 2],
-                "transform": [
-                    transform[0] * factor,
-                    transform[1],
-                    transform[2],
-                    transform[3],
-                    transform[4] * factor,
-                    transform[5],
-                ],
+                "transform": {"scale": [2, 2]},
             }
         )
     return layout
@@ -109,8 +109,11 @@ def granule_attrs(
             SPATIAL_CONVENTION,
         ],
         "proj:code": f"EPSG:{int(epsg)}",
-        "spatial:dimensions": [rows, cols],
+        # The pixel counts are the *shape*; "dimensions" is the pair of
+        # dimension names, in row-major order.
+        "spatial:shape": [rows, cols],
+        "spatial:dimensions": ["y", "x"],
         "spatial:transform": affine,
         "spatial:bbox": [xmin, ymin, xmax, ymax],
-        "multiscales": {"layout": multiscale_layout(affine, levels, prefix=prefix)},
+        "multiscales": {"layout": multiscale_layout(levels, prefix=prefix)},
     }
