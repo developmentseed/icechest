@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
+from pyiceberg.expressions import And, GreaterThanOrEqual, LessThanOrEqual
+
 from icechest.demo.source import (
     DATETIME_FLOOR,
     archive_metadata_url,
     granule_filter,
 )
+
+
+def leaves(expression):
+    """Every leaf predicate of a conjunction, in any order."""
+    if isinstance(expression, And):
+        return leaves(expression.left) + leaves(expression.right)
+    return [expression]
 
 
 def test_metadata_url_is_the_archive_layout():
@@ -45,7 +54,38 @@ def test_tile_filter_matches_the_granule_id_prefix():
     assert "HLS.L30.T20JKP." in rendered
 
 
-def test_bbox_filter_uses_all_four_bounds():
-    rendered = str(granule_filter(bbox=(-67.0, -29.0, -65.0, -27.0)))
-    for bound in ("bbox.xmin", "bbox.xmax", "bbox.ymin", "bbox.ymax"):
-        assert bound in rendered
+def test_bbox_filter_pairs_each_bound_with_the_right_field():
+    """A transposed comparison would still mention all four fields, so the
+    test has to pin which bound each one is compared against."""
+    rendered = {
+        str(term)
+        for term in leaves(
+            granule_filter(bbox=(-67.0, -29.0, -65.0, -27.0))
+        )
+    }
+
+    assert str(GreaterThanOrEqual("bbox.xmax", -67.0)) in rendered
+    assert str(LessThanOrEqual("bbox.xmin", -65.0)) in rendered
+    assert str(GreaterThanOrEqual("bbox.ymax", -29.0)) in rendered
+    assert str(LessThanOrEqual("bbox.ymin", -27.0)) in rendered
+
+
+def test_caller_range_starting_before_the_floor_still_gets_the_floor():
+    """A caller asking for 2020 data must not thereby escape the floor: the
+    two conditions are conjoined, not substituted."""
+    rendered = {
+        str(term)
+        for term in leaves(
+            granule_filter(
+                datetime=(
+                    "2020-01-01T00:00:00+00:00",
+                    "2020-06-01T00:00:00+00:00",
+                )
+            )
+        )
+    }
+    assert str(GreaterThanOrEqual("datetime", DATETIME_FLOOR)) in rendered
+    assert (
+        str(GreaterThanOrEqual("datetime", "2020-01-01T00:00:00+00:00"))
+        in rendered
+    )
