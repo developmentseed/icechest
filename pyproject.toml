@@ -25,6 +25,7 @@ demo = [
     "obspec-utils>=0.9",
     "stac-hash>=0.0.2",
     "earthaccess-auth>=0.3.1",
+    "xarray>=2025.1",
     # Partitioned writes compute the partition transform in PyIceberg's
     # Rust extension, which is an optional install.
     "pyiceberg-core>=0.10",

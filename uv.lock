@@ -295,6 +295,7 @@ demo = [
     { name = "stac-hash" },
     { name = "virtual-tiff" },
     { name = "virtualizarr" },
+    { name = "xarray" },
 ]
 
 [package.dev-dependencies]
@@ -317,6 +318,7 @@ requires-dist = [
     { name = "stac-hash", marker = "extra == 'demo'", specifier = ">=0.0.2" },
     { name = "virtual-tiff", marker = "extra == 'demo'", specifier = ">=0.5" },
     { name = "virtualizarr", marker = "extra == 'demo'", specifier = ">=2.7" },
+    { name = "xarray", marker = "extra == 'demo'", specifier = ">=2025.1" },
     { name = "zarr", specifier = ">=3" },
 ]
 provides-extras = ["demo"]
