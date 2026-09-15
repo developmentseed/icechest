@@ -1,5 +1,11 @@
 # icechest
 
+<p align="center">
+  <img src="docs/Icechest_logo.png"
+       alt="A red cooler with icechunk and Apache Iceberg stickers on its side"
+       width="520">
+</p>
+
 A hybrid store where **Icechunk** manages array data and **Apache Iceberg** manages
 the tabular metadata describing it.
 
