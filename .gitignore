@@ -20,7 +20,9 @@ htmlcov/
 # tempfile.mkdtemp() and leave nothing behind.
 *.icechunk/
 /warehouse/
+/examples/hls-demo-store/*
 
 # Environment and editor
 .env
 .DS_Store
+
