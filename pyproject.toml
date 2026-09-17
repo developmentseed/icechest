@@ -17,6 +17,22 @@ dependencies = [
     "numpy>=2",
 ]
 
+[project.optional-dependencies]
+demo = [
+    "virtualizarr>=2.7",
+    "virtual-tiff>=0.5",
+    "obstore>=0.11",
+    "obspec-utils>=0.9",
+    "stac-hash>=0.0.2",
+    "earthaccess-auth>=0.3.1",
+    "xarray>=2025.1",
+    # Notebook-only: what backs ``DataArray.plot`` when a level is displayed.
+    "matplotlib>=3.9",
+    # Partitioned writes compute the partition transform in PyIceberg's
+    # Rust extension, which is an optional install.
+    "pyiceberg-core>=0.10",
+]
+
 [dependency-groups]
 dev = [
     "jsonschema>=4.26.0",
@@ -45,3 +61,7 @@ indent-style = "space"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "network: hits live services (MAAP archive, Earthdata, LP DAAC); deselected by default",
+]
+addopts = "-m 'not network'"

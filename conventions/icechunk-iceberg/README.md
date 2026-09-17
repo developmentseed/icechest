@@ -72,11 +72,16 @@ commit metadata** of the snapshot being read, under the key
 }
 ```
 
-To read a table at a snapshot, a reader:
+The two attributes answer different questions. To learn which tables a
+snapshot holds, a reader reads `iceberg:tables` from the group attributes. To
+read a table it can already name, a reader:
 
-1. reads `iceberg:tables` from the group attributes to learn which tables exist;
-2. reads `iceberg:table_versions` from that snapshot's commit metadata;
-3. loads the `metadata.json` at the resulting URI.
+1. reads `iceberg:table_versions` from that snapshot's commit metadata;
+2. loads the `metadata.json` at that table's URI.
+
+Resolution does not go through the group. The pointer is per-snapshot and
+arrives with the snapshot already in hand, so a reader holding a table's name
+needs nothing else; discovery is what the declaration is for.
 
 Writers MUST write a table's declaration and its first pointer in the same
 commit, and MUST include an entry for every declared table in every subsequent
@@ -87,7 +92,10 @@ the other.
 
 A declared table missing from `iceberg:table_versions` therefore indicates a
 malformed store. Readers MUST report it rather than falling back to a version
-from another snapshot, and SHOULD continue to expose the arrays.
+from another snapshot, and SHOULD continue to expose the arrays. A reader
+resolving by name meets this as a missing pointer, and reads the declaration
+then -- to tell a malformed store from a table this snapshot simply does not
+have.
 
 ## Why the version is not in the attributes
 

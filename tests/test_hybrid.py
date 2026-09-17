@@ -131,3 +131,33 @@ def test_snapshot_predating_a_table_does_not_declare_it(repo):
     assert "quality" not in early_snap.pointers
     with pytest.raises(KeyError, match="not declared"):
         early_snap.table("quality")
+
+
+def test_create_table_forwards_partitioning_and_sort_order(repo):
+    """A table's layout is fixed when it is created, so an intent that drops
+    the spec on the floor produces an unpartitioned, unsorted table that no
+    later call can correct."""
+    from pyiceberg.partitioning import PartitionField, PartitionSpec
+    from pyiceberg.schema import Schema
+    from pyiceberg.table.sorting import SortField, SortOrder
+    from pyiceberg.transforms import IdentityTransform, TruncateTransform
+    from pyiceberg.types import LongType, NestedField
+
+    schema = Schema(
+        NestedField(field_id=1, name="key", field_type=LongType(), required=False),
+    )
+    spec = PartitionSpec(
+        PartitionField(
+            source_id=1, field_id=1000, transform=TruncateTransform(16), name="block"
+        )
+    )
+    order = SortOrder(SortField(source_id=1, transform=IdentityTransform()))
+
+    with repo.transaction("main", "seed") as tx:
+        tx.group.create_array("data", shape=(10,), dtype="f4", chunks=(10,))
+        tx.create_table("keyed", schema, partition_spec=spec, sort_order=order)
+
+    table = repo.read("main").table("keyed")
+    assert [f.name for f in table.spec().fields] == ["block"]
+    assert table.spec().fields[0].transform.width == 16
+    assert [f.source_id for f in table.sort_order().fields] == [1]

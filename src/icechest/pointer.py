@@ -45,19 +45,6 @@ def read_pointers_at_tag(repo: icechunk.Repository, tag: str) -> dict[str, str]:
     return read_pointers(repo, repo.lookup_tag(tag))
 
 
-def resolve_metadata_location(
-    name: str, repo: icechunk.Repository, snapshot_id: str
-) -> str:
-    """Resolve a table's current ``metadata.json`` at ``snapshot_id``."""
-    pointers = read_pointers(repo, snapshot_id)
-    if name not in pointers:
-        raise ValueError(
-            f"Table {name!r} is declared in the Zarr attributes but has no "
-            f"pointer in commit metadata at snapshot {snapshot_id}."
-        )
-    return pointers[name]
-
-
 def commit_metadata(pointers: dict[str, str]) -> dict[str, Any]:
     """Wrap a pointer map for passing to ``Session.commit(metadata=...)``."""
     return {POINTER_KEY: dict(pointers)}

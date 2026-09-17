@@ -1,0 +1,329 @@
+"""The real write path, driven offline.
+
+``write_granule`` is what actually decides where an array lands and where its
+pyramid declaration says it landed. Everything else in the batch path was
+covered by a stub writer, which is how the arrays came to be written one group
+deeper than the layout declared them without a test noticing.
+
+No network is involved: a ``ManifestArray`` over a ``ChunkManifest`` is just a
+recorded byte range, and the container the URL falls under is declared when the
+store is opened. Nothing reads the referenced object.
+"""
+
+from __future__ import annotations
+
+import functools
+from datetime import UTC, datetime
+
+import pyarrow as pa
+import pytest
+import xarray as xr
+import zarr
+from pyiceberg.schema import Schema
+from pyiceberg.types import (
+    DoubleType,
+    IntegerType,
+    ListType,
+    NestedField,
+    StringType,
+    StructType,
+    TimestamptzType,
+)
+from virtualizarr.manifests import ChunkManifest, ManifestArray
+from zarr.codecs import BytesCodec
+from zarr.core.metadata.v3 import ArrayV3Metadata
+from zarr.dtype import parse_data_type
+
+from icechest.demo.conventions import MULTISCALES_GROUP
+from icechest.demo.ingest import ingest_batch
+from icechest.demo.store import ensure_table, open_store
+from icechest.demo.virtualize import GranuleError, write_granule
+from tests.demo.test_virtualize import HREF, build_tiff
+
+GRANULE = "HLS.L30.T20JKP.2026004T142004.v2.0"
+S3_URL = (
+    "s3://lp-prod-protected/HLSL30.020/"
+    "HLS.L30.T20JKP.2026004T142004.v2.0/"
+    "HLS.L30.T20JKP.2026004T142004.v2.0.B04.tif"
+)
+#: A three-level pyramid, deliberately not square so a transposition shows.
+SIZES = [(800, 500), (400, 250), (200, 125)]
+
+#: The archive's shape, cut down to the fields the writer actually reads.
+SOURCE = Schema(
+    NestedField(field_id=1, name="id", field_type=StringType(), required=False),
+    NestedField(field_id=2, name="proj:epsg", field_type=IntegerType(), required=False),
+    NestedField(
+        field_id=3,
+        name="proj:shape",
+        field_type=ListType(
+            element_id=4, element_type=IntegerType(), element_required=False
+        ),
+        required=False,
+    ),
+    NestedField(
+        field_id=5,
+        name="proj:transform",
+        field_type=ListType(
+            element_id=6, element_type=DoubleType(), element_required=False
+        ),
+        required=False,
+    ),
+    NestedField(
+        field_id=20, name="datetime", field_type=TimestamptzType(), required=False
+    ),
+    NestedField(
+        field_id=21,
+        name="bbox",
+        field_type=StructType(
+            NestedField(field_id=22, name="xmin", field_type=DoubleType()),
+            NestedField(field_id=23, name="ymin", field_type=DoubleType()),
+            NestedField(field_id=24, name="xmax", field_type=DoubleType()),
+            NestedField(field_id=25, name="ymax", field_type=DoubleType()),
+        ),
+        required=False,
+    ),
+    NestedField(
+        field_id=7,
+        name="assets",
+        field_type=StructType(
+            NestedField(
+                field_id=8,
+                name="B04",
+                field_type=StructType(
+                    NestedField(
+                        field_id=9,
+                        name="href",
+                        field_type=StringType(),
+                        required=False,
+                    )
+                ),
+                required=False,
+            )
+        ),
+        required=False,
+    ),
+)
+
+
+def virtual_level(level: int) -> xr.Dataset:
+    """What ``VirtualTIFF(ifd=level)`` produces: one variable named ``str(level)``."""
+    width, height = SIZES[level]
+    metadata = ArrayV3Metadata(
+        shape=(height, width),
+        data_type=parse_data_type("uint16", zarr_format=3),
+        chunk_grid={
+            "name": "regular",
+            "configuration": {"chunk_shape": (height, width)},
+        },
+        chunk_key_encoding={"name": "default"},
+        fill_value=0,
+        codecs=[BytesCodec()],
+        attributes={},
+        dimension_names=("y", "x"),
+    )
+    array = ManifestArray(
+        metadata=metadata,
+        chunkmanifest=ChunkManifest(
+            {"0.0": {"path": S3_URL, "offset": 0, "length": 1024}}
+        ),
+    )
+    return xr.Dataset({str(level): xr.Variable(("y", "x"), array)})
+
+
+def row(bands=("B04", "B03")):
+    return {
+        "id": GRANULE,
+        "proj:epsg": 32620,
+        "proj:shape": [500, 800],
+        "proj:transform": [30.0, 0.0, 199980.0, 0.0, -30.0, -3099960.0, 0.0, 0.0, 1.0],
+        # datetime and bbox are what the stac_hash column is computed from.
+        "datetime": datetime(2026, 1, 4, tzinfo=UTC),
+        "bbox": {"xmin": -66.1, "ymin": -29.0, "xmax": -65.3, "ymax": -28.0},
+        "assets": {band: {"href": HREF} for band in bands},
+    }
+
+
+def seams():
+    """The two network-touching calls, answered from the synthetic pyramid."""
+    return {
+        "opener": lambda url, registry, ifd: virtual_level(ifd),
+        "header_reader": lambda url, registry: build_tiff(SIZES),
+    }
+
+
+@pytest.fixture
+def written(tmp_path):
+    """One granule, written by the real writer, read back from the commit."""
+    repo = open_store(tmp_path)
+    tx = repo.transaction("main", "write one granule")
+    write_granule(tx, row(), registry=None, bands=("B04", "B03"), **seams())
+    tx.session.commit("write one granule")
+    return repo.read("main").group
+
+
+def walk(group, prefix=""):
+    """Every node under ``group``, as ``{path: "Group" | "Array"}``."""
+    found = {}
+    for name, node in group.members():
+        path = f"{prefix}/{name}"
+        found[path] = type(node).__name__
+        if isinstance(node, zarr.Group):
+            found.update(walk(node, path))
+    return found
+
+
+def test_each_level_is_a_group_holding_one_array(written):
+    """Levels are sibling groups, not sibling arrays. Their y and x differ by
+    a factor of two, and dimensions of the same name must agree within a node,
+    so levels sharing one node collide -- which is what stopped
+    ``xr.open_datatree`` from opening a pyramid at all.
+
+    The array inside carries the band's name: ``VirtualTIFF`` names its
+    variable after the IFD index it read, which says nothing about the data,
+    and that name becomes the variable name any reader sees.
+    """
+    hierarchy = walk(written)
+
+    for level in range(len(SIZES)):
+        level_path = f"/{GRANULE}/B04/{MULTISCALES_GROUP}/{level}"
+        assert hierarchy.get(level_path) == "Group", hierarchy
+        assert hierarchy.get(f"{level_path}/B04") == "Array", hierarchy
+    # The array is the deepest node: nothing below /{level}/{band}.
+    assert not [p for p in hierarchy if p.count("/") > 5]
+
+
+def test_a_level_carrying_more_than_one_variable_is_refused(tmp_path):
+    """The rename picks the variable to call the band, so it has to be
+    unambiguous. A parser returning two would otherwise have one of them
+    silently renamed and the other written under whatever it came with."""
+    repo = open_store(tmp_path)
+    tx = repo.transaction("main", "write one granule")
+
+    def two_variables(url, registry, ifd):
+        one = virtual_level(ifd)
+        return one.assign({"extra": one[str(ifd)]})
+
+    with pytest.raises(GranuleError, match="one variable"):
+        write_granule(
+            tx,
+            row(),
+            registry=None,
+            bands=("B04",),
+            opener=two_variables,
+            header_reader=lambda url, registry: build_tiff(SIZES),
+        )
+
+
+def test_a_level_is_not_named_after_the_ifd_it_came_from(written):
+    """``VirtualTIFF(ifd=n)`` names its variable ``str(n)``, so writing the
+    dataset unrenamed puts an array called ``"1"`` inside the group already
+    called ``1``."""
+    hierarchy = walk(written)
+
+    for level in range(len(SIZES)):
+        stutter = f"/{GRANULE}/B04/{MULTISCALES_GROUP}/{level}/{level}"
+        assert stutter not in hierarchy, hierarchy
+
+
+def test_the_pyramid_opens_as_a_datatree(written, tmp_path):
+    """The point of the group layout. Every level in one node raises
+    "conflicting sizes for dimension 'y'"; a node per level is what xarray
+    can represent.
+
+    Nothing is fetched from LP DAAC: opening reads the Zarr metadata, and the
+    chunks stay the virtual references they were written as.
+    """
+    tree = xr.open_datatree(
+        written.store,
+        group=f"{GRANULE}/B04/{MULTISCALES_GROUP}",
+        consolidated=False,
+        engine="zarr",
+    )
+
+    for level in range(len(SIZES)):
+        width, height = SIZES[level]
+        assert tree[str(level)]["B04"].shape == (height, width)
+
+
+def test_layout_paths_resolve_to_the_arrays_from_where_the_attributes_live(written):
+    """A layout entry names a path relative to the group carrying it. If that
+    path does not reach an array, the pyramid declaration points at nothing."""
+    band = written[f"{GRANULE}/B04"]
+    layout = dict(band.attrs)["multiscales"]["layout"]
+
+    assert len(layout) == len(SIZES)
+    for index, entry in enumerate(layout):
+        resolved = band[entry["asset"]]
+        assert isinstance(resolved, zarr.Array), entry
+        height, width = SIZES[index][1], SIZES[index][0]
+        assert resolved.shape == (height, width)
+        if "derived_from" in entry:
+            assert isinstance(band[entry["derived_from"]], zarr.Array), entry
+
+
+def test_every_band_gets_its_own_pyramid_and_attributes(written):
+    for band_name in ("B04", "B03"):
+        band = written[f"{GRANULE}/{band_name}"]
+        attrs = dict(band.attrs)
+        assert attrs["proj:code"] == "EPSG:32620"
+        assert len(attrs["multiscales"]["layout"]) == len(SIZES)
+        assert isinstance(band[f"{MULTISCALES_GROUP}/0"], zarr.Group)
+        assert isinstance(band[f"{MULTISCALES_GROUP}/0/{band_name}"], zarr.Array)
+
+
+def test_batch_path_writes_the_same_hierarchy(tmp_path):
+    """The seams reach through ``ingest_batch``, so the batch path -- not just a
+    hand-driven transaction -- is covered by the assertions above."""
+    repo = open_store(tmp_path)
+    ensure_table(repo, SOURCE)
+    rows = pa.Table.from_pylist([row(bands=("B04",))], schema=SOURCE.as_arrow())
+
+    result = ingest_batch(
+        repo,
+        rows,
+        registry=None,
+        bands=("B04",),
+        writer=functools.partial(write_granule, **seams()),
+    )
+
+    assert result.committed == [GRANULE]
+    snap = repo.read("main")
+    assert snap.table("granules").scan().to_arrow()["array_path"].to_pylist() == [
+        f"/{GRANULE}"
+    ]
+    assert isinstance(
+        snap.group[f"{GRANULE}/B04/{MULTISCALES_GROUP}/0/B04"], zarr.Array
+    )
+
+
+def resolved_path(repo, array_path="/{g}/B04/{m}/0/B04"):
+    """The chunk location this reader would fetch, after the resolver runs."""
+    session = repo.readonly_session(branch="main")
+    path = array_path.format(g=GRANULE, m=MULTISCALES_GROUP)
+    batch = next(iter(session.store.array_chunk_iterator(path, 10)))
+    return batch[2][0]
+
+
+def test_reference_resolves_to_whichever_endpoint_the_reader_configured(tmp_path):
+    """The point of a relative reference: one store, written once, readable
+    from us-west-2 over s3 and from anywhere over https. An absolute URL in the
+    manifest would bake in whichever endpoint the writer happened to use."""
+    repo = open_store(tmp_path)
+    tx = repo.transaction("main", "write one granule")
+    write_granule(tx, row(bands=("B04",)), registry=None, bands=("B04",), **seams())
+    tx.session.commit("write one granule")
+
+    over_s3 = resolved_path(open_store(tmp_path).repo)
+    over_https = resolved_path(
+        open_store(tmp_path, access="https", token="a-token").repo
+    )
+
+    assert over_s3.startswith("s3://lp-prod-protected/")
+    assert over_https.startswith(
+        "https://data.lpdaac.earthdatacloud.nasa.gov/lp-prod-protected/"
+    )
+    # Same object either way: only the endpoint differs.
+    assert over_s3.removeprefix("s3://lp-prod-protected/") == over_https.removeprefix(
+        "https://data.lpdaac.earthdatacloud.nasa.gov/lp-prod-protected/"
+    )
