@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from functools import cached_property
 from types import TracebackType
 from typing import TYPE_CHECKING, Any
 
@@ -30,7 +31,6 @@ from icechest.pointer import (
     commit_metadata,
     read_pointers,
     read_pointers_at_branch,
-    resolve_metadata_location,
 )
 from icechest.validation import conflicting_adds
 
@@ -481,10 +481,25 @@ class HybridSnapshot:
     _repo: HybridRepo
     snapshot_id: str
 
-    @property
-    def group(self) -> zarr.Group:
+    @cached_property
+    def store(self) -> icechunk.IcechunkStore:
+        """The read-only Icechunk store holding this snapshot's arrays.
+
+        This is the handle to give anything that opens a store of its own --
+        ``xarray.open_zarr`` and friends -- rather than reaching through
+        :attr:`group` for one.
+
+        Cached because a snapshot is immutable: every read through it sees the
+        same bytes no matter how many sessions are open, so opening a second
+        one buys nothing but another session to keep.
+        """
         session = self._repo.repo.readonly_session(snapshot_id=self.snapshot_id)
-        return zarr.open_group(session.store, mode="r")
+        return session.store
+
+    @cached_property
+    def group(self) -> zarr.Group:
+        """The root Zarr group: this snapshot's arrays, opposite :meth:`table`."""
+        return zarr.open_group(self.store, mode="r")
 
     @property
     def pointers(self) -> dict[str, str]:
@@ -496,15 +511,38 @@ class HybridSnapshot:
         return read_bindings(self.group)
 
     def table(self, name: str) -> Any:
-        """Load a table, resolving its version the way the convention says to."""
-        bindings = self.bindings
-        if name not in bindings:
-            raise KeyError(
-                f"Table {name!r} is not declared on this Zarr group. "
-                f"Declared: {sorted(bindings)}"
-            )
-        location = resolve_metadata_location(
-            name, self._repo.repo, self.snapshot_id
-        )
-        catalog = self._repo._catalog_for({name: location}, read_only=True)
+        """Load a table, resolving its version the way the convention says to.
+
+        The pointer in commit metadata is what resolves a table, and it
+        arrives with the snapshot already in hand. The declaration on the
+        group is read only when that pointer is missing, to say which of two
+        very different things went wrong -- see :meth:`_unresolvable`.
+        """
+        pointers = self.pointers
+        if name not in pointers:
+            raise self._unresolvable(name)
+        catalog = self._repo._catalog_for({name: pointers[name]}, read_only=True)
         return catalog.load_table(name)
+
+    def _unresolvable(self, name: str) -> Exception:
+        """Why ``name`` has no pointer here: never declared, or a broken store.
+
+        Consulting the declaration is worth a group read on this path and not
+        on the happy one. The convention has writers land a table's
+        declaration and its first pointer in the same commit, so a snapshot
+        predating the table has neither half and a snapshot after it has both.
+        Half of one is a malformed store, which a reader must report rather
+        than quietly resolve against some other snapshot's version.
+        """
+        declared = self.bindings
+        if name not in declared:
+            return KeyError(
+                f"Table {name!r} is not declared on this Zarr group. "
+                f"Declared: {sorted(declared)}"
+            )
+        return ValueError(
+            f"Table {name!r} is declared in the Zarr attributes but has no "
+            f"pointer in commit metadata at snapshot {self.snapshot_id}. "
+            "The store is malformed: the convention requires both halves in "
+            "the same commit."
+        )
