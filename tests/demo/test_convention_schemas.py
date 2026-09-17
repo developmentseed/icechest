@@ -55,7 +55,11 @@ def node(levels: int = 5) -> dict:
         "zarr_format": 3,
         "node_type": "group",
         "attributes": granule_attrs(
-            epsg=32620, shape=SHAPE, transform=TRANSFORM, levels=levels
+            epsg=32620,
+            shape=SHAPE,
+            transform=TRANSFORM,
+            levels=levels,
+            array_name="B04",
         ),
     }
 

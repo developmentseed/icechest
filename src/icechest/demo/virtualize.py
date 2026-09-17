@@ -101,11 +101,17 @@ def write_granule(
     Writes into the transaction's own session, so the references are staged
     alongside the table pointer and published by the same commit.
 
+    Each level is a group of its own holding one array, because levels differ
+    in y and x and dimensions of one name must agree within a node: as sibling
+    arrays in a shared group they collide, and neither ``xr.open_dataset`` nor
+    ``xr.open_datatree`` can open the pyramid.
+
     ``VirtualTIFF(ifd=n)`` yields a single-variable dataset whose variable is
-    named ``str(n)``, and ``to_icechunk`` writes variables *inside* the group it
-    is given -- so every level goes into one shared ``multiscales`` group and
-    the variable name supplies the level. Naming the level in the group path as
-    well would bury each array one node deeper than the layout declares it.
+    named ``str(n)``, and ``to_icechunk`` writes variables *inside* the group
+    it is given. Left alone that puts an array called ``"1"`` inside the group
+    already called ``1``, and names the data after the IFD it was read from,
+    which says nothing about what it is -- so the variable is renamed to the
+    band first.
 
     The seams are forwarded from :func:`virtual_granule` so this whole path --
     the nesting and the attribute placement included -- can be driven without a
@@ -126,7 +132,14 @@ def write_granule(
         # against their own endpoint. Every chunk of a level points at the one
         # asset, so a single replacement path is exactly right.
         reference = to_vcc_url(row["assets"][band]["href"])
-        for _level, dataset in sorted(per_level.items()):
+        for level, dataset in sorted(per_level.items()):
+            variables = list(dataset.data_vars)
+            if len(variables) != 1:
+                raise GranuleError(
+                    f"{row['id']}: expected one variable per level in {band}, "
+                    f"got {variables}"
+                )
+            leveled = dataset.rename({variables[0]: band})
             # validate_containers is off because that check matches container
             # prefixes literally and does not understand the vcc:// scheme; it
             # would reject every relative reference. What it was guarding
@@ -134,9 +147,9 @@ def write_granule(
             # ruled out by construction: every href goes through asset_key,
             # which refuses anything outside the container's bucket, before a
             # single byte is staged.
-            dataset.vz.rename_paths(reference).vz.to_icechunk(
+            leveled.vz.rename_paths(reference).vz.to_icechunk(
                 store=tx.session.store,
-                group=f"/{granule_id}/{band}/{MULTISCALES_GROUP}",
+                group=f"/{granule_id}/{band}/{MULTISCALES_GROUP}/{level}",
                 mode="a",
                 validate_containers=False,
             )
@@ -151,6 +164,7 @@ def write_granule(
                 shape=row["proj:shape"],
                 transform=row["proj:transform"],
                 levels=arrays.levels[band],
+                array_name=band,
             )
         )
     return f"/{granule_id}"

@@ -49,16 +49,26 @@ SPATIAL_CONVENTION: dict[str, str] = {
 MULTISCALES_GROUP = "multiscales"
 
 #: ``asset`` and ``derived_from`` are relative to the group carrying these
-#: attributes, which is the band group -- one above the levels themselves.
+#: attributes, which is the band group -- two above the arrays themselves,
+#: since each level is a group of its own.
 LEVEL_ASSET_PREFIX = f"{MULTISCALES_GROUP}/"
 
 
 def multiscale_layout(
     levels: int,
     *,
+    array_name: str,
     prefix: str = LEVEL_ASSET_PREFIX,
 ) -> list[dict[str, Any]]:
     """Describe the COG's overview pyramid, one entry per resolution level.
+
+    Each level is a group holding one array, and an ``asset`` resolves to the
+    array rather than to the group above it -- the convention's nested-array
+    layout, ``{"asset": "0/data"}``. Levels could be sibling arrays instead;
+    the convention permits that too, and calls it the natural translation of
+    COG overviews. They are groups because levels differ in y and x while
+    dimensions of one name must agree within a node, so sibling arrays cannot
+    be opened together as a dataset or a DataTree at all.
 
     A layout entry's ``transform`` is defined *relative to* ``derived_from``,
     so each overview's step from the level above it is a factor of two in both
@@ -70,12 +80,12 @@ def multiscale_layout(
     ``prefix`` is prepended to every path, because the paths are resolved
     relative to whichever group these attributes are written to.
     """
-    layout: list[dict[str, Any]] = [{"asset": f"{prefix}0"}]
+    layout: list[dict[str, Any]] = [{"asset": f"{prefix}0/{array_name}"}]
     for level in range(1, levels):
         layout.append(
             {
-                "asset": f"{prefix}{level}",
-                "derived_from": f"{prefix}{level - 1}",
+                "asset": f"{prefix}{level}/{array_name}",
+                "derived_from": f"{prefix}{level - 1}/{array_name}",
                 "transform": {"scale": [2, 2]},
             }
         )
@@ -88,9 +98,13 @@ def granule_attrs(
     shape: Sequence[int],
     transform: Sequence[float],
     levels: int,
+    array_name: str,
     prefix: str = LEVEL_ASSET_PREFIX,
 ) -> dict[str, Any]:
     """Build the convention attributes for one band group.
+
+    ``array_name`` is what the array inside each level group is called, which
+    is what an ``asset`` path has to end in.
 
     ``transform`` is the archive's nine-element row-major affine; the conventions
     want the six that carry the affine itself. The projected bounds fall out of
@@ -115,5 +129,7 @@ def granule_attrs(
         "spatial:dimensions": ["y", "x"],
         "spatial:transform": affine,
         "spatial:bbox": [xmin, ymin, xmax, ymax],
-        "multiscales": {"layout": multiscale_layout(levels, prefix=prefix)},
+        "multiscales": {
+            "layout": multiscale_layout(levels, array_name=array_name, prefix=prefix)
+        },
     }

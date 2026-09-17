@@ -37,7 +37,7 @@ from zarr.dtype import parse_data_type
 from icechest.demo.conventions import MULTISCALES_GROUP
 from icechest.demo.ingest import ingest_batch
 from icechest.demo.store import ensure_table, open_store
-from icechest.demo.virtualize import write_granule
+from icechest.demo.virtualize import GranuleError, write_granule
 from tests.demo.test_virtualize import HREF, build_tiff
 
 GRANULE = "HLS.L30.T20JKP.2026004T142004.v2.0"
@@ -173,17 +173,77 @@ def walk(group, prefix=""):
     return found
 
 
-def test_each_level_is_an_array_not_a_group(written):
-    """The regression guard: the level is the array's *name*, not a group above
-    it. Writing to ``multiscales/{level}`` puts the array at
-    ``multiscales/{level}/{level}``, one node below everything that names it."""
+def test_each_level_is_a_group_holding_one_array(written):
+    """Levels are sibling groups, not sibling arrays. Their y and x differ by
+    a factor of two, and dimensions of the same name must agree within a node,
+    so levels sharing one node collide -- which is what stopped
+    ``xr.open_datatree`` from opening a pyramid at all.
+
+    The array inside carries the band's name: ``VirtualTIFF`` names its
+    variable after the IFD index it read, which says nothing about the data,
+    and that name becomes the variable name any reader sees.
+    """
     hierarchy = walk(written)
 
     for level in range(len(SIZES)):
-        path = f"/{GRANULE}/B04/{MULTISCALES_GROUP}/{level}"
-        assert hierarchy.get(path) == "Array", hierarchy
-    # Nothing below the arrays: no /{level}/{level}.
-    assert not [p for p in hierarchy if p.count("/") > 4]
+        level_path = f"/{GRANULE}/B04/{MULTISCALES_GROUP}/{level}"
+        assert hierarchy.get(level_path) == "Group", hierarchy
+        assert hierarchy.get(f"{level_path}/B04") == "Array", hierarchy
+    # The array is the deepest node: nothing below /{level}/{band}.
+    assert not [p for p in hierarchy if p.count("/") > 5]
+
+
+def test_a_level_carrying_more_than_one_variable_is_refused(tmp_path):
+    """The rename picks the variable to call the band, so it has to be
+    unambiguous. A parser returning two would otherwise have one of them
+    silently renamed and the other written under whatever it came with."""
+    repo = open_store(tmp_path)
+    tx = repo.transaction("main", "write one granule")
+
+    def two_variables(url, registry, ifd):
+        one = virtual_level(ifd)
+        return one.assign({"extra": one[str(ifd)]})
+
+    with pytest.raises(GranuleError, match="one variable"):
+        write_granule(
+            tx,
+            row(),
+            registry=None,
+            bands=("B04",),
+            opener=two_variables,
+            header_reader=lambda url, registry: build_tiff(SIZES),
+        )
+
+
+def test_a_level_is_not_named_after_the_ifd_it_came_from(written):
+    """``VirtualTIFF(ifd=n)`` names its variable ``str(n)``, so writing the
+    dataset unrenamed puts an array called ``"1"`` inside the group already
+    called ``1``."""
+    hierarchy = walk(written)
+
+    for level in range(len(SIZES)):
+        stutter = f"/{GRANULE}/B04/{MULTISCALES_GROUP}/{level}/{level}"
+        assert stutter not in hierarchy, hierarchy
+
+
+def test_the_pyramid_opens_as_a_datatree(written, tmp_path):
+    """The point of the group layout. Every level in one node raises
+    "conflicting sizes for dimension 'y'"; a node per level is what xarray
+    can represent.
+
+    Nothing is fetched from LP DAAC: opening reads the Zarr metadata, and the
+    chunks stay the virtual references they were written as.
+    """
+    tree = xr.open_datatree(
+        written.store,
+        group=f"{GRANULE}/B04/{MULTISCALES_GROUP}",
+        consolidated=False,
+        engine="zarr",
+    )
+
+    for level in range(len(SIZES)):
+        width, height = SIZES[level]
+        assert tree[str(level)]["B04"].shape == (height, width)
 
 
 def test_layout_paths_resolve_to_the_arrays_from_where_the_attributes_live(written):
@@ -208,7 +268,8 @@ def test_every_band_gets_its_own_pyramid_and_attributes(written):
         attrs = dict(band.attrs)
         assert attrs["proj:code"] == "EPSG:32620"
         assert len(attrs["multiscales"]["layout"]) == len(SIZES)
-        assert isinstance(band[f"{MULTISCALES_GROUP}/0"], zarr.Array)
+        assert isinstance(band[f"{MULTISCALES_GROUP}/0"], zarr.Group)
+        assert isinstance(band[f"{MULTISCALES_GROUP}/0/{band_name}"], zarr.Array)
 
 
 def test_batch_path_writes_the_same_hierarchy(tmp_path):
@@ -231,10 +292,12 @@ def test_batch_path_writes_the_same_hierarchy(tmp_path):
     assert snap.table("granules").scan().to_arrow()["array_path"].to_pylist() == [
         f"/{GRANULE}"
     ]
-    assert isinstance(snap.group[f"{GRANULE}/B04/{MULTISCALES_GROUP}/0"], zarr.Array)
+    assert isinstance(
+        snap.group[f"{GRANULE}/B04/{MULTISCALES_GROUP}/0/B04"], zarr.Array
+    )
 
 
-def resolved_path(repo, array_path="/{g}/B04/{m}/0"):
+def resolved_path(repo, array_path="/{g}/B04/{m}/0/B04"):
     """The chunk location this reader would fetch, after the resolver runs."""
     session = repo.readonly_session(branch="main")
     path = array_path.format(g=GRANULE, m=MULTISCALES_GROUP)
