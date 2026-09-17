@@ -26,6 +26,8 @@ demo = [
     "stac-hash>=0.0.2",
     "earthaccess-auth>=0.3.1",
     "xarray>=2025.1",
+    # Notebook-only: what backs ``DataArray.plot`` when a level is displayed.
+    "matplotlib>=3.9",
     # Partitioned writes compute the partition transform in PyIceberg's
     # Rust extension, which is an optional install.
     "pyiceberg-core>=0.10",
