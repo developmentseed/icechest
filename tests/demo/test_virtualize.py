@@ -1,10 +1,10 @@
-"""Virtualization, driven through its injected seams so no COG is needed."""
+"""Virtualization, driven through its injected seam so no COG is needed."""
 
 from __future__ import annotations
 
-import struct
-
+import numpy as np
 import pytest
+import xarray as xr
 
 from icechest.demo.virtualize import GranuleError, virtual_granule
 
@@ -14,18 +14,18 @@ HREF = (
 )
 
 
-def build_tiff(sizes):
-    header = struct.pack("<2sHI", b"II", 42, 8)
-    ifd_size = 2 + 2 * 12 + 4
-    body = b""
-    for index, (width, height) in enumerate(sizes):
-        offset = 8 + index * ifd_size
-        nxt = 0 if index == len(sizes) - 1 else offset + ifd_size
-        body += struct.pack("<H", 2)
-        body += struct.pack("<HHII", 256, 4, 1, width)
-        body += struct.pack("<HHII", 257, 4, 1, height)
-        body += struct.pack("<I", nxt)
-    return header + body
+def build_tree(sizes):
+    """What ``open_virtual_datatree(url, registry, VirtualTIFF(ifd=None,
+    ifd_layout="nested"))`` returns: one child group per IFD, keyed by the
+    IFD's index, each holding one array named after that same index with
+    dims ``(y, x)`` -- a TIFF reports width before height, so ``sizes`` here
+    is ``(width, height)`` pairs, matching that reporting order.
+    """
+    root = xr.DataTree()
+    for level, (width, height) in enumerate(sizes):
+        dataset = xr.Dataset({str(level): (("y", "x"), np.zeros((height, width)))})
+        root[str(level)] = xr.DataTree(dataset=dataset)
+    return root
 
 
 def row(shape=(3660, 3660), bands=("B04",)):
@@ -38,28 +38,46 @@ def row(shape=(3660, 3660), bands=("B04",)):
     }
 
 
-def test_opens_one_dataset_per_level():
-    opened = []
+def test_opens_one_pyramid_call_per_band():
+    """``VirtualTIFF(ifd=None)`` parses every IFD in one pass, so opening a
+    band's pyramid must cost one call, not one call per level."""
+    calls = []
 
-    def opener(url, registry, ifd):
-        opened.append((url, ifd))
-        return f"dataset-{ifd}"
+    def open_pyramid(url, registry):
+        calls.append(url)
+        return build_tree([(3660, 3660), (1830, 1830), (915, 915)])
 
     arrays = virtual_granule(
         row(),
         registry=None,
         bands=("B04",),
-        opener=opener,
-        header_reader=lambda url, registry: build_tiff(
-            [(3660, 3660), (1830, 1830), (915, 915)]
-        ),
+        open_pyramid=open_pyramid,
     )
 
+    assert len(calls) == 1
+    assert calls[0].startswith("s3://lp-prod-protected/")
     assert arrays.levels == {"B04": 3}
     assert arrays.shape == (3660, 3660)
-    assert arrays.datasets["B04"] == {0: "dataset-0", 1: "dataset-1", 2: "dataset-2"}
-    assert [ifd for _, ifd in opened] == [0, 1, 2]
-    assert opened[0][0].startswith("s3://lp-prod-protected/")
+    assert set(arrays.datasets["B04"]) == {0, 1, 2}
+    for level, dataset in arrays.datasets["B04"].items():
+        assert list(dataset.data_vars) == [str(level)]
+
+
+def test_opens_exactly_one_pyramid_call_per_band_across_multiple_bands():
+    calls = []
+
+    def open_pyramid(url, registry):
+        calls.append(url)
+        return build_tree([(3660, 3660)])
+
+    virtual_granule(
+        row(bands=("B04", "B03")),
+        registry=None,
+        bands=("B04", "B03"),
+        open_pyramid=open_pyramid,
+    )
+
+    assert len(calls) == 2
 
 
 def test_shape_disagreement_fails_the_granule():
@@ -70,8 +88,7 @@ def test_shape_disagreement_fails_the_granule():
             row(shape=(1830, 1830)),
             registry=None,
             bands=("B04",),
-            opener=lambda url, registry, ifd: "dataset",
-            header_reader=lambda url, registry: build_tiff([(3660, 3660)]),
+            open_pyramid=lambda url, registry: build_tree([(3660, 3660)]),
         )
 
 
@@ -82,8 +99,7 @@ def test_shape_is_rows_by_columns_not_width_by_height():
         row(shape=(500, 800)),  # 500 rows, 800 columns
         registry=None,
         bands=("B04",),
-        opener=lambda url, registry, ifd: "dataset",
-        header_reader=lambda url, registry: build_tiff([(800, 500)]),  # w=800, h=500
+        open_pyramid=lambda url, registry: build_tree([(800, 500)]),  # w=800, h=500
     )
     assert arrays.shape == (500, 800)
 
@@ -94,8 +110,19 @@ def test_granule_with_no_usable_assets_fails():
             {"id": "x", "proj:shape": [1, 1], "assets": {}},
             registry=None,
             bands=("B04",),
-            opener=lambda url, registry, ifd: "dataset",
-            header_reader=lambda url, registry: build_tiff([(1, 1)]),
+            open_pyramid=lambda url, registry: build_tree([(1, 1)]),
+        )
+
+
+def test_granule_with_no_readable_levels_fails():
+    """An empty pyramid -- e.g. a corrupt or truncated COG -- must fail the
+    granule rather than silently publishing zero levels."""
+    with pytest.raises(GranuleError, match="no readable levels"):
+        virtual_granule(
+            row(),
+            registry=None,
+            bands=("B04",),
+            open_pyramid=lambda url, registry: build_tree([]),
         )
 
 
@@ -109,8 +136,8 @@ def test_access_mode_chooses_the_url_the_headers_are_read_through():
         registry=None,
         bands=("B04",),
         access="https",
-        opener=lambda url, registry, ifd: opened.append(url) or "dataset",
-        header_reader=lambda url, registry: build_tiff([(3660, 3660)]),
+        open_pyramid=lambda url, registry: opened.append(url)
+        or build_tree([(3660, 3660)]),
     )
 
     assert arrays.levels == {"B04": 1}
