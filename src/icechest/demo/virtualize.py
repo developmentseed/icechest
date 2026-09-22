@@ -101,8 +101,8 @@ def virtual_granule(
     return GranuleArrays(datasets=datasets, levels=levels, shape=shape)
 
 
-def write_granule(
-    tx: Any,
+def write_granule_to_store(
+    store: Any,
     row: Mapping[str, Any],
     *,
     registry: Any,
@@ -110,10 +110,12 @@ def write_granule(
     access: str = "s3",
     open_pyramid: Callable[[str, Any], Any] = _open_pyramid,
 ) -> str:
-    """Stage one granule's arrays and conventions, returning its group path.
+    """Stage one granule's arrays and conventions into ``store``.
 
-    Writes into the transaction's own session, so the references are staged
-    alongside the table pointer and published by the same commit.
+    Split out of :func:`write_granule` so a backfill worker can write into a
+    ``ForkSession.store``, which has no transaction behind it -- only
+    :func:`write_granule` needs one, to stage the references alongside the
+    table pointer and publish both by the same commit.
 
     Each level is a group of its own holding one array, because levels differ
     in y and x and dimensions of one name must agree within a node: as sibling
@@ -161,16 +163,14 @@ def write_granule(
             # which refuses anything outside the container's bucket, before a
             # single byte is staged.
             leveled.vz.rename_paths(reference).vz.to_icechunk(
-                store=tx.session.store,
+                store=store,
                 group=f"/{granule_id}/{band}/{MULTISCALES_GROUP}/{level}",
                 mode="a",
                 validate_containers=False,
             )
         # The attributes live on the band group, one above the levels, so the
         # layout's paths are prefixed with the multiscales group's name.
-        group = zarr.open_group(
-            tx.session.store, path=f"/{granule_id}/{band}", mode="a"
-        )
+        group = zarr.open_group(store, path=f"/{granule_id}/{band}", mode="a")
         group.attrs.update(
             granule_attrs(
                 epsg=row["proj:epsg"],
@@ -181,3 +181,29 @@ def write_granule(
             )
         )
     return f"/{granule_id}"
+
+
+def write_granule(
+    tx: Any,
+    row: Mapping[str, Any],
+    *,
+    registry: Any,
+    bands: Sequence[str] = DEFAULT_BANDS,
+    access: str = "s3",
+    open_pyramid: Callable[[str, Any], Any] = _open_pyramid,
+) -> str:
+    """Stage one granule's arrays and conventions, returning its group path.
+
+    Writes into the transaction's own session, so the references are staged
+    alongside the table pointer and published by the same commit. The actual
+    work is :func:`write_granule_to_store`; this just supplies the store a
+    transaction carries.
+    """
+    return write_granule_to_store(
+        tx.session.store,
+        row,
+        registry=registry,
+        bands=bands,
+        access=access,
+        open_pyramid=open_pyramid,
+    )

@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import icechunk
 import numpy as np
 import pytest
+import virtualizarr  # noqa: F401 -- registers the xr.Dataset.vz accessor
 import xarray as xr
+import zarr
 
-from icechest.demo.virtualize import GranuleError, virtual_granule
+from icechest.demo.conventions import MULTISCALES_GROUP
+from icechest.demo.virtualize import GranuleError, virtual_granule, write_granule_to_store
 
 HREF = (
     "https://data.lpdaac.earthdatacloud.nasa.gov/lp-prod-protected/HLSL30.020/"
@@ -144,3 +148,33 @@ def test_access_mode_chooses_the_url_the_headers_are_read_through():
     assert all(
         url.startswith("https://data.lpdaac.earthdatacloud.nasa.gov/") for url in opened
     )
+
+
+def test_writes_into_a_bare_store(tmp_path):
+    """A ForkSession has a ``.store`` but no transaction behind it: the whole
+    point of splitting the store-level write out of ``write_granule`` is that
+    it must not need one."""
+    repo = icechunk.Repository.open_or_create(
+        icechunk.local_filesystem_storage(str(tmp_path))
+    )
+    session = repo.writable_session("main")
+
+    path = write_granule_to_store(
+        session.store,
+        row(),
+        registry=None,
+        bands=("B04",),
+        open_pyramid=lambda url, registry: build_tree(
+            [(3660, 3660), (1830, 1830)]
+        ),
+    )
+
+    assert path == "/HLS.L30.T20JKP.2026004T142004.v2.0"
+    group = zarr.open_group(session.store, path=f"{path}/B04", mode="r")
+    names = [c["name"] for c in group.attrs["zarr_conventions"]]
+    assert "multiscales" in names
+    for level in (0, 1):
+        array = zarr.open_array(
+            session.store, path=f"{path}/B04/{MULTISCALES_GROUP}/{level}/B04"
+        )
+        assert array is not None
