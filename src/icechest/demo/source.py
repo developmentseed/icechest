@@ -58,6 +58,7 @@ def granule_filter(
     tile: str | None = None,
     datetime: tuple[str, str] | None = None,
     require_proj_transform: bool = True,
+    datetime_floor: str = DATETIME_FLOOR,
 ) -> BooleanExpression:
     """Build the selection predicate.
 
@@ -74,7 +75,7 @@ def granule_filter(
     ``proj:transform`` is ``list<double>``.
     """
     terms: list[BooleanExpression] = [
-        GreaterThanOrEqual("datetime", DATETIME_FLOOR),
+        GreaterThanOrEqual("datetime", datetime_floor),
     ]
     if require_proj_transform:
         terms.append(NotNull("proj:transform"))
@@ -111,6 +112,7 @@ def select_granules(
     tile: str | None = None,
     datetime: tuple[str, str] | None = None,
     limit: int = 75,
+    datetime_floor: str = DATETIME_FLOOR,
 ) -> pa.Table:
     """Return granule records in the archive's own schema.
 
@@ -129,7 +131,11 @@ def select_granules(
     """
     scan = table.scan(
         row_filter=granule_filter(
-            bbox=bbox, tile=tile, datetime=datetime, require_proj_transform=False
+            bbox=bbox,
+            tile=tile,
+            datetime=datetime,
+            require_proj_transform=False,
+            datetime_floor=datetime_floor,
         ),
         limit=limit,
     )

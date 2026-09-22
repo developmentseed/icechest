@@ -46,13 +46,19 @@ def hasher() -> Hasher:
     return Hasher(HASH_START, HASH_END)
 
 
-def with_stac_hash(rows: pa.Table) -> pa.Table:
+def with_stac_hash(
+    rows: pa.Table, *, partition_bits: int = PARTITION_BITS
+) -> pa.Table:
     """Return ``rows`` with its ``stac_hash`` and ``stac_hash_block`` columns.
 
     Both are computed per record. The point is the centre of each granule's own
     bbox: a corner would place the hash in a cell the granule only touches.
     Out-of-extent datetimes clamp onto the boundary rather than raising, so one
     stray granule cannot fail a batch that is otherwise fine.
+
+    ``partition_bits`` controls only the width of ``stac_hash_block``, the
+    partition key derived from the high-order bits of the hash; the hash
+    itself (``stac_hash``) does not depend on it.
     """
     bbox = rows["bbox"]
     if bbox.null_count:
@@ -72,7 +78,7 @@ def with_stac_hash(rows: pa.Table) -> pa.Table:
         centre("xmin", "xmax"),
         centre("ymin", "ymax"),
     )
-    shift = 63 - PARTITION_BITS
+    shift = 63 - partition_bits
     return rows.append_column(HASH_COLUMN, pa.array(hashes, pa.int64())).append_column(
         HASH_BLOCK_COLUMN, pa.array([value >> shift for value in hashes], pa.int64())
     )
