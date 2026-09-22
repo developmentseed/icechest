@@ -165,6 +165,7 @@ class HybridTransaction:
         message: str,
         *,
         max_retries: int = DEFAULT_MAX_RETRIES,
+        session: icechunk.Session | None = None,
     ) -> None:
         self._repo = repo
         self._branch = branch
@@ -178,7 +179,17 @@ class HybridTransaction:
         #: once before the retry loop starts. See ``_assert_staged_is_covered``.
         self._unmanaged_staged: set[str] = set()
 
-        self.session = repo.repo.writable_session(branch)
+        if session is None:
+            self.session = repo.repo.writable_session(branch)
+        else:
+            # A session opened on another branch would commit this
+            # transaction's rows onto a history the caller did not name, and
+            # _recover would rebase onto the wrong tip.
+            if session.branch != branch:
+                raise ValueError(
+                    f"session is on branch {session.branch!r}, not {branch!r}"
+                )
+            self.session = session
         self.catalog = repo._catalog_for(
             read_pointers(repo.repo, self.session.snapshot_id)
         )
@@ -444,8 +455,11 @@ class HybridRepo:
         message: str = "",
         *,
         max_retries: int = DEFAULT_MAX_RETRIES,
+        session: icechunk.Session | None = None,
     ) -> HybridTransaction:
-        return HybridTransaction(self, branch, message, max_retries=max_retries)
+        return HybridTransaction(
+            self, branch, message, max_retries=max_retries, session=session
+        )
 
     # -- reading ------------------------------------------------------------
 
