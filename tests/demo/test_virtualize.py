@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import warnings
+
 import icechunk
 import numpy as np
 import pytest
-import virtualizarr  # noqa: F401 -- registers the xr.Dataset.vz accessor
 import xarray as xr
 import zarr
+from virtualizarr.manifests import ChunkManifest, ManifestArray
+from zarr.codecs import BytesCodec
+from zarr.core.metadata.v3 import ArrayV3Metadata
+from zarr.dtype import parse_data_type
 
 from icechest.demo.conventions import MULTISCALES_GROUP
 from icechest.demo.virtualize import (
@@ -154,22 +159,92 @@ def test_access_mode_chooses_the_url_the_headers_are_read_through():
     )
 
 
+#: What the real COG pipeline hands ``write_granule_to_store``: a reference
+#: into the archive object, not bytes -- distinct from ``S3_URL`` in
+#: test_write_path.py, but built the same way, so this test's chunk manifest
+#: is not a fabricated string.
+_S3_URL = (
+    "s3://lp-prod-protected/HLSL30.020/"
+    "HLS.L30.T20JKP.2026004T142004.v2.0/HLS.L30.T20JKP.2026004T142004.v2.0.B04.tif"
+)
+
+
+def virtual_level(
+    level: int, size: tuple[int, int], *, path: str = _S3_URL
+) -> xr.Dataset:
+    """A ``ManifestArray``-backed level: the same shape ``VirtualTIFF`` writes
+    (one variable named after its IFD index, backed by a chunk manifest, not
+    materialized data). Mirrors ``test_write_path.py``'s ``virtual_level``,
+    parameterized on size instead of a module-global ``SIZES`` list so it can
+    be reused with the smaller pyramids this file's other tests use.
+    """
+    width, height = size
+    metadata = ArrayV3Metadata(
+        shape=(height, width),
+        data_type=parse_data_type("uint16", zarr_format=3),
+        chunk_grid={
+            "name": "regular",
+            "configuration": {"chunk_shape": (height, width)},
+        },
+        chunk_key_encoding={"name": "default"},
+        fill_value=0,
+        codecs=[BytesCodec()],
+        attributes={},
+        dimension_names=("y", "x"),
+    )
+    array = ManifestArray(
+        metadata=metadata,
+        chunkmanifest=ChunkManifest(
+            {"0.0": {"path": path, "offset": 0, "length": 1024}}
+        ),
+    )
+    return xr.Dataset({str(level): xr.Variable(("y", "x"), array)})
+
+
+def virtual_tree(sizes: list[tuple[int, int]], *, path: str = _S3_URL) -> xr.DataTree:
+    """The virtual counterpart to ``build_tree`` above: one child group per
+    IFD, each holding a ``ManifestArray``-backed level rather than an
+    in-memory one, so a test built on it exercises the real chunk-manifest
+    write path (``rename_paths``, ``to_icechunk``'s virtual-reference branch)
+    instead of the degenerate materialized-data path.
+    """
+    root = xr.DataTree()
+    for level, size in enumerate(sizes):
+        root[str(level)] = xr.DataTree(dataset=virtual_level(level, size, path=path))
+    return root
+
+
 def test_writes_into_a_bare_store(tmp_path):
-    """A ForkSession has a ``.store`` but no transaction behind it: the whole
-    point of splitting the store-level write out of ``write_granule`` is that
-    it must not need one."""
+    """A ``ForkSession`` has a ``.store`` but no ``HybridTransaction`` behind
+    it, so ``write_granule_to_store`` must not need one -- proven here by
+    driving it off a bare ``icechunk`` session store with no transaction
+    anywhere in the call. The levels are ``ManifestArray``-backed, as a real
+    COG read would produce, so this also exercises the chunk-manifest rewrite
+    and ``to_icechunk``'s virtual-reference branch rather than only the
+    materialized-data path: if the write silently degraded to copying data
+    instead of referencing it, virtualizarr's own "non-virtual Dataset"
+    warning would fire, and the assertion below checks it does not.
+    """
     repo = icechunk.Repository.open_or_create(
         icechunk.local_filesystem_storage(str(tmp_path))
     )
     session = repo.writable_session("main")
 
-    path = write_granule_to_store(
-        session.store,
-        row(),
-        registry=None,
-        bands=("B04",),
-        open_pyramid=lambda url, registry: build_tree([(3660, 3660), (1830, 1830)]),
-    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        path = write_granule_to_store(
+            session.store,
+            row(),
+            registry=None,
+            bands=("B04",),
+            open_pyramid=lambda url, registry: virtual_tree(
+                [(3660, 3660), (1830, 1830)]
+            ),
+        )
+
+    assert not any("non-virtual Dataset" in str(w.message) for w in caught), [
+        str(w.message) for w in caught
+    ]
 
     assert path == "/HLS.L30.T20JKP.2026004T142004.v2.0"
     group = zarr.open_group(session.store, path=f"{path}/B04", mode="r")
