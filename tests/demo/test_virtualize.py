@@ -10,7 +10,11 @@ import xarray as xr
 import zarr
 
 from icechest.demo.conventions import MULTISCALES_GROUP
-from icechest.demo.virtualize import GranuleError, virtual_granule, write_granule_to_store
+from icechest.demo.virtualize import (
+    GranuleError,
+    virtual_granule,
+    write_granule_to_store,
+)
 
 HREF = (
     "https://data.lpdaac.earthdatacloud.nasa.gov/lp-prod-protected/HLSL30.020/"
@@ -164,9 +168,7 @@ def test_writes_into_a_bare_store(tmp_path):
         row(),
         registry=None,
         bands=("B04",),
-        open_pyramid=lambda url, registry: build_tree(
-            [(3660, 3660), (1830, 1830)]
-        ),
+        open_pyramid=lambda url, registry: build_tree([(3660, 3660), (1830, 1830)]),
     )
 
     assert path == "/HLS.L30.T20JKP.2026004T142004.v2.0"
