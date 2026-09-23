@@ -38,7 +38,7 @@ from icechest.demo.conventions import MULTISCALES_GROUP
 from icechest.demo.ingest import ingest_batch
 from icechest.demo.store import ensure_table, open_store
 from icechest.demo.virtualize import GranuleError, write_granule
-from tests.demo.test_virtualize import HREF, build_tiff
+from tests.demo.test_virtualize import HREF
 
 GRANULE = "HLS.L30.T20JKP.2026004T142004.v2.0"
 S3_URL = (
@@ -131,6 +131,16 @@ def virtual_level(level: int) -> xr.Dataset:
     return xr.Dataset({str(level): xr.Variable(("y", "x"), array)})
 
 
+def build_tree(sizes: list[tuple[int, int]]) -> xr.DataTree:
+    """What ``open_virtual_datatree(url, registry, VirtualTIFF(ifd=None,
+    ifd_layout="nested"))`` returns: one child group per IFD, each holding
+    the one array ``virtual_level`` builds for that IFD."""
+    root = xr.DataTree()
+    for level in range(len(sizes)):
+        root[str(level)] = xr.DataTree(dataset=virtual_level(level))
+    return root
+
+
 def row(bands=("B04", "B03")):
     return {
         "id": GRANULE,
@@ -145,11 +155,8 @@ def row(bands=("B04", "B03")):
 
 
 def seams():
-    """The two network-touching calls, answered from the synthetic pyramid."""
-    return {
-        "opener": lambda url, registry, ifd: virtual_level(ifd),
-        "header_reader": lambda url, registry: build_tiff(SIZES),
-    }
+    """The network-touching call, answered from the synthetic pyramid."""
+    return {"open_pyramid": lambda url, registry: build_tree(SIZES)}
 
 
 @pytest.fixture
@@ -200,9 +207,11 @@ def test_a_level_carrying_more_than_one_variable_is_refused(tmp_path):
     repo = open_store(tmp_path)
     tx = repo.transaction("main", "write one granule")
 
-    def two_variables(url, registry, ifd):
-        one = virtual_level(ifd)
-        return one.assign({"extra": one[str(ifd)]})
+    def two_variables(url, registry):
+        tree = build_tree(SIZES)
+        ds0 = tree.children["0"].to_dataset()
+        tree["0"] = xr.DataTree(dataset=ds0.assign({"extra": ds0["0"]}))
+        return tree
 
     with pytest.raises(GranuleError, match="one variable"):
         write_granule(
@@ -210,8 +219,7 @@ def test_a_level_carrying_more_than_one_variable_is_refused(tmp_path):
             row(),
             registry=None,
             bands=("B04",),
-            opener=two_variables,
-            header_reader=lambda url, registry: build_tiff(SIZES),
+            open_pyramid=two_variables,
         )
 
 

@@ -1,8 +1,8 @@
 """Building a granule's virtual arrays and writing them into a transaction.
 
-The two network-touching operations -- reading a COG header and opening a
-virtual dataset over one of its IFDs -- are injected, so the orchestration around
-them can be exercised without a COG.
+The network-touching operation -- opening every resolution level of a band's
+COG -- is injected, so the orchestration around it can be exercised without a
+COG.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ import zarr
 
 from icechest.demo.assets import DEFAULT_BANDS, asset_urls, to_vcc_url
 from icechest.demo.conventions import MULTISCALES_GROUP, granule_attrs
-from icechest.demo.tiff import HEADER_BYTES, parse_ifds
+from icechest.demo.tiff import HEADER_BYTES
 
 
 class GranuleError(Exception):
@@ -39,11 +39,25 @@ def read_header(url: str, registry: Any) -> bytes:
     return bytes(obstore.get_range(store, path, start=0, end=HEADER_BYTES))
 
 
-def _open_level(url: str, registry: Any, ifd: int) -> Any:
-    from virtual_tiff import VirtualTIFF
-    from virtualizarr import open_virtual_dataset
+def _open_pyramid(url: str, registry: Any) -> Any:
+    """Open every resolution level of one band's COG in a single read.
 
-    return open_virtual_dataset(url=url, registry=registry, parser=VirtualTIFF(ifd=ifd))
+    ``VirtualTIFF(ifd=None)`` parses the whole IFD chain in one pass over the
+    file instead of the parser reopening it once per level. ``ifd_layout``
+    must be ``"nested"``: ``open_virtual_dataset`` with the same parser
+    either returns an empty top-level dataset (``"nested"``) or raises on
+    colliding y/x dimensions across sibling levels (``"flat"``), so only
+    ``open_virtual_datatree`` can represent a pyramid this way -- one child
+    group per IFD, holding one array named after that IFD's index.
+    """
+    from virtual_tiff import VirtualTIFF
+    from virtualizarr import open_virtual_datatree
+
+    return open_virtual_datatree(
+        url=url,
+        registry=registry,
+        parser=VirtualTIFF(ifd=None, ifd_layout="nested"),
+    )
 
 
 def virtual_granule(
@@ -52,12 +66,11 @@ def virtual_granule(
     registry: Any,
     bands: Sequence[str] = DEFAULT_BANDS,
     access: str = "s3",
-    opener: Callable[[str, Any, int], Any] = _open_level,
-    header_reader: Callable[[str, Any], bytes] = read_header,
+    open_pyramid: Callable[[str, Any], Any] = _open_pyramid,
 ) -> GranuleArrays:
     """Open every resolution level of every requested asset.
 
-    The level count comes from each asset's own IFD chain rather than being
+    The level count comes from each asset's own pyramid rather than being
     assumed, because Fmask and the angle bands need not match the spectral
     bands' pyramid depth.
     """
@@ -70,13 +83,15 @@ def virtual_granule(
     shape: tuple[int, int] | None = None
 
     for band, url in urls.items():
-        sizes = parse_ifds(header_reader(url, registry))
-        if not sizes:
-            raise GranuleError(f"{row['id']}: no readable IFDs in {band}")
-        datasets[band] = {ifd: opener(url, registry, ifd) for ifd in range(len(sizes))}
-        levels[band] = len(sizes)
+        tree = open_pyramid(url, registry)
+        per_level = {int(key): node.to_dataset() for key, node in tree.children.items()}
+        if not per_level:
+            raise GranuleError(f"{row['id']}: no readable levels in {band}")
+        datasets[band] = per_level
+        levels[band] = len(per_level)
         if shape is None:
-            shape = (sizes[0][1], sizes[0][0])  # (rows, cols) from (width, height)
+            level0 = per_level[0]
+            shape = (int(level0.sizes["y"]), int(level0.sizes["x"]))
 
     expected = (int(row["proj:shape"][0]), int(row["proj:shape"][1]))
     if shape != expected:
@@ -86,34 +101,35 @@ def virtual_granule(
     return GranuleArrays(datasets=datasets, levels=levels, shape=shape)
 
 
-def write_granule(
-    tx: Any,
+def write_granule_to_store(
+    store: Any,
     row: Mapping[str, Any],
     *,
     registry: Any,
     bands: Sequence[str] = DEFAULT_BANDS,
     access: str = "s3",
-    opener: Callable[[str, Any, int], Any] = _open_level,
-    header_reader: Callable[[str, Any], bytes] = read_header,
+    open_pyramid: Callable[[str, Any], Any] = _open_pyramid,
 ) -> str:
-    """Stage one granule's arrays and conventions, returning its group path.
+    """Stage one granule's arrays and conventions into ``store``.
 
-    Writes into the transaction's own session, so the references are staged
-    alongside the table pointer and published by the same commit.
+    Split out of :func:`write_granule` so a backfill worker can write into a
+    ``ForkSession.store``, which has no transaction behind it -- only
+    :func:`write_granule` needs one, to stage the references alongside the
+    table pointer and publish both by the same commit.
 
     Each level is a group of its own holding one array, because levels differ
     in y and x and dimensions of one name must agree within a node: as sibling
     arrays in a shared group they collide, and neither ``xr.open_dataset`` nor
     ``xr.open_datatree`` can open the pyramid.
 
-    ``VirtualTIFF(ifd=n)`` yields a single-variable dataset whose variable is
-    named ``str(n)``, and ``to_icechunk`` writes variables *inside* the group
+    Each level's dataset carries one variable named after the IFD it came
+    from (``str(n)``), and ``to_icechunk`` writes variables *inside* the group
     it is given. Left alone that puts an array called ``"1"`` inside the group
     already called ``1``, and names the data after the IFD it was read from,
     which says nothing about what it is -- so the variable is renamed to the
     band first.
 
-    The seams are forwarded from :func:`virtual_granule` so this whole path --
+    The seam is forwarded from :func:`virtual_granule` so this whole path --
     the nesting and the attribute placement included -- can be driven without a
     COG.
     """
@@ -122,8 +138,7 @@ def write_granule(
         registry=registry,
         bands=bands,
         access=access,
-        opener=opener,
-        header_reader=header_reader,
+        open_pyramid=open_pyramid,
     )
     granule_id = row["id"]
     for band, per_level in arrays.datasets.items():
@@ -148,16 +163,14 @@ def write_granule(
             # which refuses anything outside the container's bucket, before a
             # single byte is staged.
             leveled.vz.rename_paths(reference).vz.to_icechunk(
-                store=tx.session.store,
+                store=store,
                 group=f"/{granule_id}/{band}/{MULTISCALES_GROUP}/{level}",
                 mode="a",
                 validate_containers=False,
             )
         # The attributes live on the band group, one above the levels, so the
         # layout's paths are prefixed with the multiscales group's name.
-        group = zarr.open_group(
-            tx.session.store, path=f"/{granule_id}/{band}", mode="a"
-        )
+        group = zarr.open_group(store, path=f"/{granule_id}/{band}", mode="a")
         group.attrs.update(
             granule_attrs(
                 epsg=row["proj:epsg"],
@@ -168,3 +181,29 @@ def write_granule(
             )
         )
     return f"/{granule_id}"
+
+
+def write_granule(
+    tx: Any,
+    row: Mapping[str, Any],
+    *,
+    registry: Any,
+    bands: Sequence[str] = DEFAULT_BANDS,
+    access: str = "s3",
+    open_pyramid: Callable[[str, Any], Any] = _open_pyramid,
+) -> str:
+    """Stage one granule's arrays and conventions, returning its group path.
+
+    Writes into the transaction's own session, so the references are staged
+    alongside the table pointer and published by the same commit. The actual
+    work is :func:`write_granule_to_store`; this just supplies the store a
+    transaction carries.
+    """
+    return write_granule_to_store(
+        tx.session.store,
+        row,
+        registry=registry,
+        bands=bands,
+        access=access,
+        open_pyramid=open_pyramid,
+    )

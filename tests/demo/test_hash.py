@@ -8,6 +8,8 @@ import pyarrow as pa
 import pytest
 
 from icechest.demo.hash import (
+    HASH_BLOCK_COLUMN,
+    HASH_COLUMN,
     HASH_END,
     HASH_START,
     PARTITION_BITS,
@@ -155,3 +157,25 @@ def test_near_neighbours_share_a_block_and_distant_ones_do_not():
 
     assert next_door == here
     assert far != here
+
+
+def _rows():
+    bbox = pa.StructArray.from_arrays(
+        [pa.array([-105.0]), pa.array([39.0]), pa.array([-104.0]), pa.array([40.0])],
+        names=["xmin", "ymin", "xmax", "ymax"],
+    )
+    return pa.table({
+        "datetime": pa.array([1_750_000_000_000_000], pa.timestamp("us", tz="UTC")),
+        "bbox": bbox,
+    })
+
+
+def test_partition_bits_controls_block_width():
+    rows = _rows()
+    nine = with_stac_hash(rows, partition_bits=9)[HASH_BLOCK_COLUMN][0].as_py()
+    twelve = with_stac_hash(rows, partition_bits=12)[HASH_BLOCK_COLUMN][0].as_py()
+    code = with_stac_hash(rows)[HASH_COLUMN][0].as_py()
+    assert nine == code >> (63 - 9)
+    assert twelve == code >> (63 - 12)
+    # The hash itself is independent of the block width.
+    assert with_stac_hash(rows, partition_bits=9)[HASH_COLUMN][0].as_py() == code

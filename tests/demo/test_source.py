@@ -120,3 +120,13 @@ def test_caller_range_starting_before_the_floor_still_gets_the_floor():
     }
     assert str(GreaterThanOrEqual("datetime", DATETIME_FLOOR)) in rendered
     assert str(GreaterThanOrEqual("datetime", "2020-01-01T00:00:00+00:00")) in rendered
+
+
+def test_datetime_floor_is_overridable():
+    expr = granule_filter(datetime_floor="2025-01-01T00:00:00+00:00")
+    assert "2025-01-01" in str(expr)
+    assert "2026-01-01" not in str(expr)
+
+
+def test_datetime_floor_defaults_unchanged():
+    assert DATETIME_FLOOR in str(granule_filter())
